@@ -6,6 +6,13 @@
 
 本仓库包含 **MiniMax Design Plugin for ComfyUI** 的开源代码。该项目基于 ComfyUI，为 MiniMax 创作产品提供可视化工作流编辑与本地推理能力。
 
+### 产品
+
+该插件应用于 **MiniMax Design**：
+
+- 国内站：[design.minimax.cn](https://design.minimax.cn/)
+- 海外站：[design.minimax.io](https://design.minimax.io/)
+
 ### 目录结构
 
 ```text
@@ -29,6 +36,13 @@ comfyui-plugin/
 ## English
 
 This repository contains the open-source code for **MiniMax Design Plugin for ComfyUI**. Built on top of ComfyUI, it provides visual workflow editing and local inference capabilities for MiniMax creative products.
+
+### Product
+
+This plugin is used by **MiniMax Design**:
+
+- Global: [design.minimax.io](https://design.minimax.io/)
+- Mainland China: [design.minimax.cn](https://design.minimax.cn/)
 
 ### Repository structure
 
