@@ -1,0 +1,78 @@
+<template>
+  <!-- Create a new stacking context for widgets to avoid z-index issues -->
+  <div class="isolate">
+    <DomWidget
+      v-for="widgetState in widgetStates"
+      :key="widgetState.widget.id"
+      :widget-state="widgetState"
+      @update:widget-value="widgetState.widget.value = $event"
+    />
+  </div>
+</template>
+
+<script setup lang="ts">
+import { whenever } from '@vueuse/core'
+import { computed } from 'vue'
+
+import DomWidget from '@/components/graph/widgets/DomWidget.vue'
+import { getDomWidgetZIndex } from '@/components/graph/widgets/domWidgetZIndex'
+import { useChainCallback } from '@/composables/functional/useChainCallback'
+import { useCanvasStore } from '@/renderer/core/canvas/canvasStore'
+import { useDomWidgetStore } from '@/stores/domWidgetStore'
+
+const domWidgetStore = useDomWidgetStore()
+
+const widgetStates = computed(() => [...domWidgetStore.widgetStates.values()])
+
+const updateWidgets = () => {
+  const lgCanvas = canvasStore.canvas
+  if (!lgCanvas) return
+
+  const lowQuality = lgCanvas.low_quality
+  const currentGraph = lgCanvas.graph
+
+  for (const widgetState of widgetStates.value) {
+    const widget = widgetState.widget
+
+    if (!widget.isVisible() || !widgetState.active) {
+      widgetState.visible = false
+      continue
+    }
+
+    const posNode = widget.node
+
+    const isInCorrectGraph = posNode.graph === currentGraph
+    const nodeVisible = lgCanvas.isNodeVisible(posNode)
+
+    widgetState.visible =
+      isInCorrectGraph &&
+      nodeVisible &&
+      !(widget.options.hideOnZoom && lowQuality)
+
+    if (widgetState.visible) {
+      const margin = widget.margin
+      widgetState.pos = [
+        posNode.pos[0] + margin,
+        posNode.pos[1] + margin + widget.y
+      ]
+      widgetState.size = [
+        (widget.width ?? posNode.width) - margin * 2,
+        (widget.computedHeight ?? 50) - margin * 2
+      ]
+      widgetState.zIndex = getDomWidgetZIndex(posNode, currentGraph)
+      widgetState.readonly = lgCanvas.read_only
+    }
+  }
+}
+
+const canvasStore = useCanvasStore()
+whenever(
+  () => canvasStore.canvas,
+  (canvas) =>
+    (canvas.onDrawForeground = useChainCallback(
+      canvas.onDrawForeground,
+      updateWidgets
+    )),
+  { immediate: true }
+)
+</script>

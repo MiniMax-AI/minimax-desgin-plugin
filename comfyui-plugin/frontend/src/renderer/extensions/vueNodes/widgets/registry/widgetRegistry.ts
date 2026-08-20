@@ -1,0 +1,316 @@
+/**
+ * Widget type registry and component mapping for Vue-based widgets
+ */
+import { defineAsyncComponent } from 'vue'
+import type { Component } from 'vue'
+
+import type { SafeWidgetData } from '@/composables/graph/useGraphNodeManager'
+
+const WidgetButton = defineAsyncComponent(
+  () => import('../components/WidgetButton.vue')
+)
+const WidgetInputText = defineAsyncComponent(
+  () => import('../components/WidgetInputText.vue')
+)
+const WidgetInputNumber = defineAsyncComponent(
+  () => import('../components/WidgetInputNumber.vue')
+)
+const WidgetToggleSwitch = defineAsyncComponent(
+  () => import('../components/WidgetToggleSwitch.vue')
+)
+const WidgetSelect = defineAsyncComponent(
+  () => import('../components/WidgetSelect.vue')
+)
+const WidgetColorPicker = defineAsyncComponent(
+  () => import('../components/WidgetColorPicker.vue')
+)
+const WidgetTextarea = defineAsyncComponent(
+  () => import('../components/WidgetTextarea.vue')
+)
+const WidgetChart = defineAsyncComponent(
+  () => import('../components/WidgetChart.vue')
+)
+const WidgetImageCompare = defineAsyncComponent(
+  () => import('../components/WidgetImageCompare.vue')
+)
+const WidgetGalleria = defineAsyncComponent(
+  () => import('../components/WidgetGalleria.vue')
+)
+const WidgetMarkdown = defineAsyncComponent(
+  () => import('../components/WidgetMarkdown.vue')
+)
+const WidgetTextPreview = defineAsyncComponent(
+  () => import('../components/WidgetTextPreview.vue')
+)
+const WidgetLegacy = defineAsyncComponent(
+  () => import('../components/WidgetLegacy.vue')
+)
+const WidgetRecordAudio = defineAsyncComponent(
+  () => import('../components/WidgetRecordAudio.vue')
+)
+const AudioPreviewPlayer = defineAsyncComponent(
+  () => import('../components/audio/AudioPreviewPlayer.vue')
+)
+const Load3D = defineAsyncComponent(
+  () => import('@/components/load3d/Load3D.vue')
+)
+const Load3DAdvanced = defineAsyncComponent(
+  () => import('@/components/load3d/Load3DAdvanced.vue')
+)
+const WidgetImageCrop = defineAsyncComponent(
+  () => import('@/components/imagecrop/WidgetImageCrop.vue')
+)
+const WidgetBoundingBox = defineAsyncComponent(
+  () => import('@/components/boundingbox/WidgetBoundingBox.vue')
+)
+const WidgetCurve = defineAsyncComponent(
+  () => import('@/components/curve/WidgetCurve.vue')
+)
+const WidgetPainter = defineAsyncComponent(
+  () => import('@/components/painter/WidgetPainter.vue')
+)
+const WidgetRange = defineAsyncComponent(
+  () => import('@/components/range/WidgetRange.vue')
+)
+const WidgetBoundingBoxes = defineAsyncComponent(
+  () => import('@/components/boundingBoxes/WidgetBoundingBoxes.vue')
+)
+const WidgetVideoEdit = defineAsyncComponent(
+  () => import('@/components/videoEdit/WidgetVideoEdit.vue')
+)
+const WidgetColors = defineAsyncComponent(
+  () => import('@/components/palette/WidgetColors.vue')
+)
+
+export const FOR_TESTING = {
+  WidgetButton,
+  WidgetColorPicker,
+  WidgetInputNumber,
+  WidgetInputText,
+  WidgetMarkdown,
+  WidgetSelect,
+  WidgetTextarea,
+  WidgetToggleSwitch
+} as const
+
+interface WidgetDefinition {
+  component: Component
+  aliases: string[]
+  essential: boolean
+}
+
+const coreWidgetDefinitions: Array<[string, WidgetDefinition]> = [
+  [
+    'button',
+    { component: WidgetButton, aliases: ['BUTTON'], essential: false }
+  ],
+  [
+    'string',
+    {
+      component: WidgetInputText,
+      aliases: ['STRING', 'text'],
+      essential: false
+    }
+  ],
+  ['int', { component: WidgetInputNumber, aliases: ['INT'], essential: true }],
+  [
+    'float',
+    {
+      component: WidgetInputNumber,
+      aliases: ['FLOAT', 'number', 'slider', 'gradientslider'],
+      essential: true
+    }
+  ],
+  [
+    'boolean',
+    {
+      component: WidgetToggleSwitch,
+      aliases: ['BOOLEAN', 'toggle'],
+      essential: true
+    }
+  ],
+  [
+    'combo',
+    { component: WidgetSelect, aliases: ['COMBO', 'asset'], essential: true }
+  ],
+  [
+    'color',
+    { component: WidgetColorPicker, aliases: ['COLOR'], essential: false }
+  ],
+  [
+    'textarea',
+    {
+      component: WidgetTextarea,
+      aliases: ['TEXTAREA', 'multiline', 'customtext'],
+      essential: false
+    }
+  ],
+  ['chart', { component: WidgetChart, aliases: ['CHART'], essential: false }],
+  [
+    'imagecompare',
+    {
+      component: WidgetImageCompare,
+      aliases: ['IMAGECOMPARE'],
+      essential: false
+    }
+  ],
+  [
+    'galleria',
+    { component: WidgetGalleria, aliases: ['GALLERIA'], essential: false }
+  ],
+  [
+    'markdown',
+    {
+      component: WidgetMarkdown,
+      aliases: ['MARKDOWN', 'progressText'],
+      essential: false
+    }
+  ],
+  [
+    'textPreview',
+    {
+      component: WidgetTextPreview,
+      aliases: ['TEXT_PREVIEW'],
+      essential: false
+    }
+  ],
+  ['legacy', { component: WidgetLegacy, aliases: [], essential: true }],
+  [
+    'audiorecord',
+    {
+      component: WidgetRecordAudio,
+      aliases: ['AUDIO_RECORD', 'AUDIORECORD'],
+      essential: false
+    }
+  ],
+  [
+    'audioUI',
+    {
+      component: AudioPreviewPlayer,
+      aliases: ['AUDIOUI', 'AUDIO_UI'],
+      essential: false
+    }
+  ],
+  ['load3D', { component: Load3D, aliases: ['LOAD_3D'], essential: false }],
+  [
+    'load3DAdvanced',
+    {
+      component: Load3DAdvanced,
+      aliases: ['LOAD_3D_ADVANCED'],
+      essential: false
+    }
+  ],
+  [
+    'imagecrop',
+    {
+      component: WidgetImageCrop,
+      aliases: ['IMAGECROP'],
+      essential: false
+    }
+  ],
+  [
+    'boundingbox',
+    {
+      component: WidgetBoundingBox,
+      aliases: ['BOUNDING_BOX'],
+      essential: false
+    }
+  ],
+  [
+    'curve',
+    {
+      component: WidgetCurve,
+      aliases: ['CURVE'],
+      essential: false
+    }
+  ],
+  [
+    'painter',
+    {
+      component: WidgetPainter,
+      aliases: ['PAINTER'],
+      essential: false
+    }
+  ],
+  [
+    'range',
+    {
+      component: WidgetRange,
+      aliases: ['RANGE'],
+      essential: false
+    }
+  ],
+  [
+    'boundingboxes',
+    {
+      component: WidgetBoundingBoxes,
+      aliases: ['BOUNDING_BOXES'],
+      essential: false
+    }
+  ],
+  [
+    'videoedit',
+    {
+      component: WidgetVideoEdit,
+      aliases: ['VIDEO_EDIT'],
+      essential: false
+    }
+  ],
+  [
+    'colors',
+    {
+      component: WidgetColors,
+      aliases: ['COLORS'],
+      essential: false
+    }
+  ]
+]
+
+// Build lookup maps
+const widgets = new Map<string, WidgetDefinition>()
+const aliasMap = new Map<string, string>()
+
+for (const [type, def] of coreWidgetDefinitions) {
+  widgets.set(type, def)
+  for (const alias of def.aliases) {
+    aliasMap.set(alias, type)
+  }
+}
+
+// Utility functions
+const getCanonicalType = (type: string): string => aliasMap.get(type) || type
+
+export const getComponent = (type: string): Component | null => {
+  const canonicalType = getCanonicalType(type)
+  return widgets.get(canonicalType)?.component || null
+}
+
+export const isEssential = (type: string): boolean => {
+  const canonicalType = getCanonicalType(type)
+  return widgets.get(canonicalType)?.essential || false
+}
+
+export const shouldRenderAsVue = (widget: Partial<SafeWidgetData>): boolean => {
+  return !widget.options?.canvasOnly && !!widget.type
+}
+
+const EXPANDING_TYPES = [
+  'textarea',
+  'markdown',
+  'textPreview',
+  'load3D',
+  'load3DAdvanced',
+  'curve',
+  'painter',
+  'imagecompare',
+  'range',
+  'boundingboxes',
+  'videoedit'
+] as const
+
+export function shouldExpand(type: string): boolean {
+  const canonicalType = getCanonicalType(type)
+  return EXPANDING_TYPES.includes(
+    canonicalType as (typeof EXPANDING_TYPES)[number]
+  )
+}

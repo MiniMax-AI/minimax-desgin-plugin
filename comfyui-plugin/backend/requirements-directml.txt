@@ -1,0 +1,8 @@
+# AMD DirectML 候选包：torch-directml 0.2.5 的上游依赖固定为 PyTorch 2.4.1。
+# 正式发布前必须在 Windows AMD 真机完成安装、启动和出图验证。
+-r requirements.txt
+torch==2.4.1
+torchvision==0.19.1
+torchaudio==2.4.1
+torch-directml==0.2.5.dev240914
+transformers>=4.50.3,<5

@@ -1,0 +1,280 @@
+import { computed, ref } from 'vue'
+import type { Ref } from 'vue'
+import { useFuse } from '@vueuse/integrations/useFuse'
+import type { UseFuseOptions } from '@vueuse/integrations/useFuse'
+import { storeToRefs } from 'pinia'
+
+import { t } from '@/i18n'
+import type {
+  AssetFilterState,
+  OwnershipOption
+} from '@/platform/assets/types/filterTypes'
+import type { AssetItem } from '@/platform/assets/schemas/assetSchema'
+import { useAssetFilterOptions } from '@/platform/assets/composables/useAssetFilterOptions'
+import {
+  filterByBaseModels,
+  filterByCategory,
+  filterByFileFormats,
+  filterByOwnership
+} from '@/platform/assets/utils/assetFilterUtils'
+import {
+  getAssetBaseModels,
+  getAssetCategories,
+  getAssetFilename,
+  getAssetTypeBadges
+} from '@/platform/assets/utils/assetMetadataUtils'
+import { MODELS_TAG } from '@/platform/assets/services/assetService'
+import { sortAssets } from '@/platform/assets/utils/assetSortUtils'
+import { useFeatureFlags } from '@/composables/useFeatureFlags'
+import { useAssetDownloadStore } from '@/stores/assetDownloadStore'
+import type { NavGroupData, NavItemData } from '@/types/navTypes'
+
+type NavId = 'all' | 'imported' | (string & {})
+
+type AssetBadge = {
+  label: string
+  type: 'type' | 'base' | 'size'
+}
+
+// Display properties for transformed assets
+export interface AssetDisplayItem extends AssetItem {
+  secondaryText: string
+  badges: AssetBadge[]
+  stats: {
+    downloadCount?: string
+    stars?: string
+  }
+}
+
+const displayItemCache = new WeakMap<
+  AssetItem,
+  { modelTypeMode: boolean; item: AssetDisplayItem }
+>()
+
+function buildDisplayItem(
+  asset: AssetItem,
+  modelTypeMode: boolean
+): AssetDisplayItem {
+  const badges: AssetBadge[] = []
+
+  for (const typeBadge of getAssetTypeBadges(asset, modelTypeMode)) {
+    badges.push({ label: typeBadge, type: 'type' })
+  }
+
+  for (const model of getAssetBaseModels(asset)) {
+    badges.push({ label: model, type: 'base' })
+  }
+
+  // Intentionally no formatted date here — the WeakMap caches by AssetItem
+  // reference, so a pre-formatted string would pin the locale active at first
+  // transform. AssetCard formats `created_at` at render via `d()` instead.
+  return {
+    ...asset,
+    secondaryText: getAssetFilename(asset),
+    badges,
+    stats: {
+      downloadCount: undefined,
+      stars: undefined
+    }
+  }
+}
+
+function transformAssetForDisplay(
+  asset: AssetItem,
+  modelTypeMode: boolean
+): AssetDisplayItem {
+  const cached = displayItemCache.get(asset)
+  if (cached && cached.modelTypeMode === modelTypeMode) return cached.item
+  const item = buildDisplayItem(asset, modelTypeMode)
+  displayItemCache.set(asset, { modelTypeMode, item })
+  return item
+}
+
+/**
+ * Asset Browser composable
+ * Manages search, filtering, asset transformation and selection logic
+ */
+export function useAssetBrowser(
+  assetsSource: Ref<AssetItem[] | undefined> = ref<AssetItem[] | undefined>([])
+) {
+  const assets = computed<AssetItem[]>(() => assetsSource.value ?? [])
+  const assetDownloadStore = useAssetDownloadStore()
+  const { sessionDownloadCount } = storeToRefs(assetDownloadStore)
+  const { flags } = useFeatureFlags()
+
+  // State
+  const searchQuery = ref('')
+  const selectedNavItem = ref<NavId>('all')
+  const filters = ref<AssetFilterState>({
+    sortBy: 'recent',
+    fileFormats: [],
+    baseModels: [],
+    ownership: 'all'
+  })
+
+  const selectedOwnership = computed<OwnershipOption>(() => {
+    if (typeCategories.value.length <= 1) return filters.value.ownership
+    if (selectedNavItem.value === 'imported') return 'my-models'
+    if (selectedNavItem.value === 'all') return 'all'
+    return filters.value.ownership
+  })
+
+  const selectedCategory = computed(() => {
+    if (
+      selectedNavItem.value === 'all' ||
+      selectedNavItem.value === 'imported'
+    ) {
+      return 'all'
+    }
+    return selectedNavItem.value
+  })
+
+  const typeCategories = computed<NavItemData[]>(() => {
+    const modelTypeMode = flags.supportsModelTypeTags
+    const categories = assets.value
+      .filter((asset) => asset.tags.includes(MODELS_TAG))
+      .flatMap((asset) => getAssetCategories(asset, modelTypeMode))
+
+    return Array.from(new Set(categories))
+      .sort()
+      .map((category) => ({
+        id: category,
+        label: category.charAt(0).toUpperCase() + category.slice(1),
+        icon: 'icon-[lucide--folder]'
+      }))
+  })
+
+  const navItems = computed<(NavItemData | NavGroupData)[]>(() => {
+    const quickFilters: NavItemData[] = [
+      {
+        id: 'all',
+        label: t('assetBrowser.allModels'),
+        icon: 'icon-[lucide--list]'
+      },
+      {
+        id: 'imported',
+        label: t('assetBrowser.imported'),
+        icon: 'icon-[lucide--folder-input]',
+        badge:
+          sessionDownloadCount.value > 0
+            ? sessionDownloadCount.value
+            : undefined
+      }
+    ]
+
+    if (typeCategories.value.length === 0) {
+      return quickFilters
+    }
+
+    return [
+      ...quickFilters,
+      {
+        title: t('assetBrowser.byType'),
+        items: typeCategories.value,
+        collapsible: false
+      }
+    ]
+  })
+
+  const isImportedSelected = computed(
+    () => selectedNavItem.value === 'imported'
+  )
+
+  // Compute content title from selected nav item
+  const contentTitle = computed(() => {
+    if (selectedNavItem.value === 'all') {
+      return t('assetBrowser.allModels')
+    }
+    if (selectedNavItem.value === 'imported') {
+      return t('assetBrowser.imported')
+    }
+
+    const category = typeCategories.value.find(
+      (cat) => cat.id === selectedNavItem.value
+    )
+    return category?.label || t('assetBrowser.assets')
+  })
+
+  // Category-filtered assets for filter options (before search/format/base model filters)
+  const categoryFilteredAssets = computed(() => {
+    return assets.value.filter(
+      filterByCategory(selectedCategory.value, flags.supportsModelTypeTags)
+    )
+  })
+
+  const { availableFileFormats, availableBaseModels } = useAssetFilterOptions(
+    categoryFilteredAssets
+  )
+
+  const activeFileFormats = computed(() =>
+    filters.value.fileFormats.filter((f) =>
+      availableFileFormats.value.some((opt) => opt.value === f)
+    )
+  )
+
+  const activeBaseModels = computed(() =>
+    filters.value.baseModels.filter((m) =>
+      availableBaseModels.value.some((opt) => opt.value === m)
+    )
+  )
+
+  const fuseOptions: UseFuseOptions<AssetItem> = {
+    fuseOptions: {
+      keys: [
+        { name: 'name', weight: 0.4 },
+        { name: 'tags', weight: 0.3 },
+        { name: 'user_metadata.name', weight: 0.4 },
+        { name: 'user_metadata.additional_tags', weight: 0.3 },
+        { name: 'user_metadata.trained_words', weight: 0.3 },
+        { name: 'user_metadata.user_description', weight: 0.3 },
+        { name: 'metadata.name', weight: 0.4 },
+        { name: 'metadata.trained_words', weight: 0.3 }
+      ],
+      threshold: 0.4, // Higher threshold for typo tolerance (0.0 = exact, 1.0 = match all)
+      ignoreLocation: true, // Search anywhere in the string, not just at the beginning
+      includeScore: true
+    },
+    matchAllWhenSearchEmpty: true
+  }
+
+  const { results: fuseResults } = useFuse(
+    searchQuery,
+    categoryFilteredAssets,
+    fuseOptions
+  )
+
+  const searchFiltered = computed(() =>
+    fuseResults.value.map((result) => result.item)
+  )
+
+  const filteredAssets = computed(() => {
+    const filtered = searchFiltered.value
+      .filter(filterByFileFormats(activeFileFormats.value))
+      .filter(filterByBaseModels(activeBaseModels.value))
+      .filter(filterByOwnership(selectedOwnership.value))
+
+    const sortedAssets = sortAssets(filtered, filters.value.sortBy)
+
+    // Transform to display format
+    const modelTypeMode = flags.supportsModelTypeTags
+    return sortedAssets.map((asset) =>
+      transformAssetForDisplay(asset, modelTypeMode)
+    )
+  })
+
+  function updateFilters(newFilters: AssetFilterState) {
+    filters.value = { ...newFilters }
+  }
+
+  return {
+    searchQuery,
+    selectedNavItem,
+    selectedCategory,
+    navItems,
+    contentTitle,
+    categoryFilteredAssets,
+    filteredAssets,
+    isImportedSelected,
+    updateFilters
+  }
+}

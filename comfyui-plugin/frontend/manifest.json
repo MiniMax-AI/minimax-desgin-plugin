@@ -1,0 +1,32 @@
+{
+  "id": "comfyui",
+  "name": {
+    "zh-CN": "ComfyUI 工作流",
+    "en-US": "ComfyUI"
+  },
+  "description": {
+    "zh-CN": "节点式 AI 绘图工作流编辑器，连接本机 ComfyUI 后端。",
+    "en-US": "Node-based AI image generation workflow editor, backed by a local ComfyUI server."
+  },
+  "details": {
+    "zh-CN": "在画布中打开完整的 ComfyUI 工作流编辑器：拖拽节点、连线、运行队列、实时预览生成结果。\n\n首次使用时会提示下载官方托管的 ComfyUI 后端包（后台安装，完成后提示）；之后每次打开节点会自动启动后端，无需任何手动配置。后端版本由插件统一下发，有新版本时会提示更新。\n\n实际出图还需自行下载模型权重放入数据目录的 models/ 下（安装完成后可在设置中查看路径）。不适用于：无本地后端的纯云端环境。",
+    "en-US": "Opens the full ComfyUI workflow editor on the canvas: drag nodes, wire them up, run the queue, and preview results live.\n\nOn first use the plugin downloads a managed ComfyUI backend bundle (installed in the background with a completion notice); afterwards the backend starts automatically whenever the node opens — no manual setup. Backend versions are distributed with the plugin, and you'll be prompted when an update ships.\n\nGenerating images additionally requires model weights placed under the data directory's models/ folder. Not applicable for: cloud-only environments with no local backend."
+  },
+  "previews": {
+    "zh-CN": [],
+    "en-US": []
+  },
+  "tags": {
+    "zh-CN": ["绘图", "工作流", "节点", "AI"],
+    "en-US": ["Image", "Workflow", "Nodes", "AI"]
+  },
+  "version": "0.2.4",
+  "icon": {
+    "zh-CN": "assets/images/comfy-icon-192.png",
+    "en-US": "assets/images/comfy-icon-192.png"
+  },
+  "entry": "index.html",
+  "displayMode": "launcher",
+  "width": 711,
+  "height": 400
+}

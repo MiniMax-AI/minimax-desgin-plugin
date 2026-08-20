@@ -1,0 +1,560 @@
+import { debounce } from 'es-toolkit'
+import { defineStore } from 'pinia'
+import { computed, onScopeDispose, ref, watch } from 'vue'
+
+import { useFeatureFlags } from '@/composables/useFeatureFlags'
+import type { ModelFile } from '@/platform/assets/schemas/assetSchema'
+import { assetService } from '@/platform/assets/services/assetService'
+import { isCloud } from '@/platform/distribution/types'
+import { useSettingStore } from '@/platform/settings/settingStore'
+import { api } from '@/scripts/api'
+
+/** (Internal helper) finds a value in a metadata object from any of a list of keys. */
+function _findInMetadata(
+  metadata: Record<string, string | null>,
+  ...keys: string[]
+): string | null {
+  for (const key of keys) {
+    if (key in metadata) {
+      const value = metadata[key]
+      return value || null
+    }
+    for (const k in metadata) {
+      if (k.endsWith(key)) {
+        const value = metadata[k]
+        return value || null
+      }
+    }
+  }
+  return null
+}
+
+/** Defines and holds metadata for a model */
+export class ComfyModelDef {
+  /** Path to the model */
+  readonly path_index: number
+  /** Proper filename of the model */
+  readonly file_name: string
+  /** Normalized filename of the model, with all backslashes replaced with forward slashes */
+  readonly normalized_file_name: string
+  /** Directory containing the model, eg 'checkpoints' */
+  readonly directory: string
+  /** Simplified copy of name, used as a default title. Excludes the directory and the '.safetensors' file extension */
+  readonly simplified_file_name: string
+  /** Key for the model, used to uniquely identify the model. */
+  readonly key: string
+  /** Title / display name of the model, sometimes same as the name but not always */
+  title: string
+  /** Metadata: architecture ID for the model, such as 'stable-diffusion-xl-v1-base' */
+  architecture_id: string = ''
+  /** Metadata: author of the model */
+  author: string = ''
+  /** Metadata: resolution of the model, eg '1024x1024' */
+  resolution: string = ''
+  /** Metadata: description of the model */
+  description: string = ''
+  /** Metadata: usage hint for the model */
+  usage_hint: string = ''
+  /** Metadata: trigger phrase for the model */
+  trigger_phrase: string = ''
+  /** Metadata: tags list for the model */
+  tags: string[] = []
+  /** Metadata: image for the model */
+  image: string = ''
+  /** Whether the model metadata has been loaded from the server, used for `load()` */
+  has_loaded_metadata: boolean = false
+  /** If true, a metadata load request has been triggered, but may or may not yet have finished loading */
+  is_load_requested: boolean = false
+  /** A string full of auto-computed lowercase-only searchable text for this model */
+  searchable: string = ''
+
+  constructor(name: string, directory: string, pathIndex: number) {
+    this.path_index = pathIndex
+    this.file_name = name
+    this.normalized_file_name = name.replaceAll('\\', '/')
+    this.simplified_file_name = this.normalized_file_name.split('/').pop() ?? ''
+    if (this.simplified_file_name.endsWith('.safetensors')) {
+      this.simplified_file_name = this.simplified_file_name.slice(
+        0,
+        -'.safetensors'.length
+      )
+    }
+    this.title = this.simplified_file_name
+    this.directory = directory
+    this.key = `${directory}/${this.normalized_file_name}`
+    this.updateSearchable()
+  }
+
+  updateSearchable() {
+    this.searchable = [
+      this.file_name,
+      this.title,
+      this.author,
+      this.description,
+      this.trigger_phrase,
+      this.tags.join(', ')
+    ]
+      .join('\n')
+      .toLowerCase()
+  }
+
+  /** Loads the model metadata from the server, filling in this object if data is available */
+  async load(): Promise<void> {
+    if (this.has_loaded_metadata || this.is_load_requested) {
+      return
+    }
+    // viewMetadata reads the safetensors header off local disk; on Cloud the
+    // model bytes live in object storage so there is nothing to read.
+    if (isCloud) {
+      return
+    }
+    this.is_load_requested = true
+    try {
+      const metadata = await api.viewMetadata(this.directory, this.file_name)
+      if (!metadata) {
+        return
+      }
+      this.title =
+        _findInMetadata(
+          metadata,
+          'modelspec.title',
+          'title',
+          'display_name',
+          'name'
+        ) || this.title
+      this.architecture_id =
+        _findInMetadata(metadata, 'modelspec.architecture', 'architecture') ||
+        ''
+      this.author =
+        _findInMetadata(metadata, 'modelspec.author', 'author') || ''
+      this.description =
+        _findInMetadata(metadata, 'modelspec.description', 'description') || ''
+      this.resolution =
+        _findInMetadata(metadata, 'modelspec.resolution', 'resolution') || ''
+      this.usage_hint =
+        _findInMetadata(metadata, 'modelspec.usage_hint', 'usage_hint') || ''
+      this.trigger_phrase =
+        _findInMetadata(
+          metadata,
+          'modelspec.trigger_phrase',
+          'trigger_phrase'
+        ) || ''
+      this.image =
+        _findInMetadata(
+          metadata,
+          'modelspec.thumbnail',
+          'thumbnail',
+          'image',
+          'icon'
+        ) || ''
+      const tagsCommaSeparated =
+        _findInMetadata(metadata, 'modelspec.tags', 'tags') || ''
+      this.tags = tagsCommaSeparated.split(',').map((tag) => tag.trim())
+      this.has_loaded_metadata = true
+      this.updateSearchable()
+    } catch (error) {
+      console.error('Error loading model metadata', this.file_name, this, error)
+    }
+  }
+}
+
+export enum ResourceState {
+  Uninitialized,
+  Loading,
+  Loaded
+}
+
+/**
+ * Resolves the preview image for a model: embedded metadata thumbnail when
+ * loaded, otherwise the server-rendered `.webp` preview. The preview endpoint
+ * reads a rendered thumbnail off local disk, which is unavailable on Cloud
+ * (model bytes live in object storage), so Cloud resolves to no preview.
+ */
+export function getModelPreviewUrl(model: ComfyModelDef): string {
+  if (model.image) return model.image
+  if (isCloud) return ''
+  const extension = model.file_name.split('.').pop()
+  const filename = model.file_name.replace(`.${extension}`, '.webp')
+  const encodedFilename = encodeURIComponent(filename).replace(/%2F/g, '/')
+  return `/api/experiment/models/preview/${encodeURIComponent(model.directory)}/${model.path_index}/${encodedFilename}`
+}
+
+/**
+ * FE-owned copy of core's default `supported_pt_extensions`, applied to
+ * match-all folders (empty registered allowlist) so they don't surface
+ * README/config noise. Accepted to go stale across core version bumps; the
+ * whole surface is expected to be short-lived.
+ */
+const DEFAULT_MODEL_EXTENSIONS = [
+  '.ckpt',
+  '.pt',
+  '.pt2',
+  '.bin',
+  '.pth',
+  '.safetensors',
+  '.pkl',
+  '.sft'
+]
+
+/**
+ * Real (`.`-prefixed) entries of a registered allowlist. Non-prefixed
+ * entries (`'folder'`, `''`) are backend sentinels, not extensions — a list
+ * containing only sentinels means match-all, the same as an empty list.
+ */
+function realExtensions(extensions: string[]): string[] {
+  return extensions.filter((ext) => ext.startsWith('.'))
+}
+
+/**
+ * Resolves a folder's display allowlist from its raw registered `extensions`
+ * (`/experiment/models`): a list with real extensions is used verbatim; a
+ * match-all list (empty, sentinel-only, or absent on older backends) takes
+ * the FE default list, reproducing the legacy sidebar's global-set behavior
+ * so nothing that used to be hidden starts showing.
+ */
+export function effectiveModelExtensions(
+  extensions: string[] | undefined
+): string[] {
+  if (extensions && realExtensions(extensions).length > 0) return extensions
+  return DEFAULT_MODEL_EXTENSIONS
+}
+
+/**
+ * Whether a model file belongs in a folder given its display allowlist. A
+ * list with no real extensions leaves the folder unfiltered.
+ */
+export function matchesModelExtension(
+  fileName: string,
+  extensions: string[]
+): boolean {
+  const real = realExtensions(extensions)
+  if (real.length === 0) return true
+  const lower = fileName.toLowerCase()
+  return real.some((ext) => lower.endsWith(ext.toLowerCase()))
+}
+
+export class ModelFolder {
+  /** Models in this folder */
+  models: Record<string, ComfyModelDef> = {}
+  state: ResourceState = ResourceState.Uninitialized
+
+  constructor(
+    public directory: string,
+    private getModelsFunc: (folder: string) => Promise<ModelFile[]>,
+    public readonly extensions: string[] = []
+  ) {}
+
+  get key(): string {
+    return this.directory + '/'
+  }
+
+  /**
+   * Loads the models in this folder from the server
+   */
+  async load() {
+    if (this.state !== ResourceState.Uninitialized) {
+      return this
+    }
+    this.state = ResourceState.Loading
+    try {
+      const models = await this.getModelsFunc(this.directory)
+      for (const model of models) {
+        if (!matchesModelExtension(model.name, this.extensions)) continue
+        this.models[`${model.pathIndex}/${model.name}`] = new ComfyModelDef(
+          model.name,
+          this.directory,
+          model.pathIndex
+        )
+      }
+      this.state = ResourceState.Loaded
+      return this
+    } catch (error) {
+      // Reset instead of sticking at Loading so the guard above does not
+      // permanently block a retry after a transient failure.
+      this.state = ResourceState.Uninitialized
+      throw error
+    }
+  }
+}
+
+/** Model store handler, wraps individual per-folder model stores */
+export const useModelStore = defineStore('models', () => {
+  const settingStore = useSettingStore()
+  const modelFolderNames = ref<string[]>([])
+  const modelFolderByName = ref<Record<string, ModelFolder>>({})
+  const modelFolders = computed<ModelFolder[]>(() =>
+    modelFolderNames.value.map(
+      (folderName) => modelFolderByName.value[folderName]
+    )
+  )
+  const models = computed<ComfyModelDef[]>(() =>
+    modelFolders.value.flatMap((folder) => Object.values(folder.models))
+  )
+  /**
+   * Folders worth showing in the sidebar. Asset mode hides folders that
+   * loaded empty — the registry lists every registered folder type, most of
+   * which have no models on a given install; they reappear live when a scan
+   * discovers a first model. The legacy path keeps its historical
+   * all-registered-folders view.
+   */
+  const visibleModelFolders = computed<ModelFolder[]>(() =>
+    usesAssetApi()
+      ? modelFolders.value.filter(
+          (folder) =>
+            folder.state !== ResourceState.Loaded ||
+            Object.keys(folder.models).length > 0
+        )
+      : modelFolders.value
+  )
+
+  /**
+   * Whether model contents come from the asset API. Named to avoid confusion
+   * with assetService.isAssetAPIEnabled(), which is cloud-gated and governs
+   * the asset browser surfaces, not this store's data source.
+   */
+  function usesAssetApi(): boolean {
+    return !!settingStore.get('Comfy.Assets.UseAssetAPI')
+  }
+
+  function createGetModelsFunc(): (folder: string) => Promise<ModelFile[]> {
+    return usesAssetApi()
+      ? (folder) => assetService.getAssetModels(folder)
+      : (folder) => api.getModels(folder)
+  }
+
+  let modelFoldersRequestId = 0
+
+  /**
+   * Whether anything has consumed this store's model data (sidebar loads,
+   * folder refreshes). The boot-registered scan subscription uses this to
+   * skip background reloads nothing is displaying.
+   */
+  let modelDataConsumed = false
+
+  interface PreparedModelFolders {
+    requestId: number
+    names: string[]
+    folders: Record<string, ModelFolder>
+  }
+
+  /**
+   * Fetches the folder structure and builds a fresh, uncommitted folder map.
+   *
+   * The folder list (and its registration order) always comes from
+   * `/experiment/models`, the source of truth for which model folders exist;
+   * only the per-folder contents differ between the asset API and legacy paths.
+   * Concurrent loads (manual refresh racing the scan-complete reload) commit
+   * only the newest request, so returns null when superseded — a slow stale
+   * response cannot overwrite a fresher folder structure.
+   */
+  async function prepareModelFolders(): Promise<PreparedModelFolders | null> {
+    const requestId = ++modelFoldersRequestId
+    const resData = await api.getModelFolders()
+    if (requestId !== modelFoldersRequestId) return null
+    const getModelsFunc = createGetModelsFunc()
+    const folders: Record<string, ModelFolder> = {}
+    for (const folder of resData) {
+      folders[folder.name] = new ModelFolder(
+        folder.name,
+        getModelsFunc,
+        // Display filtering applies to the asset walk only; the legacy
+        // listing keeps its historical server-side (global-set) filtering.
+        usesAssetApi() ? effectiveModelExtensions(folder.extensions) : []
+      )
+    }
+    return { requestId, names: resData.map((folder) => folder.name), folders }
+  }
+
+  function commitModelFolders({ names, folders }: PreparedModelFolders): void {
+    modelFolderNames.value = names
+    modelFolderByName.value = folders
+  }
+
+  /** Loads the model folder structure from the server; false when superseded. */
+  async function loadModelFolders(): Promise<boolean> {
+    const prepared = await prepareModelFolders()
+    if (!prepared) return false
+    commitModelFolders(prepared)
+    return true
+  }
+
+  async function getLoadedModelFolder(
+    folderName: string
+  ): Promise<ModelFolder | null> {
+    modelDataConsumed = true
+    const folder = modelFolderByName.value[folderName]
+    return folder ? await folder.load() : null
+  }
+
+  /**
+   * Loads all model folders' contents from the server. Loads the folder
+   * structure first when it has not arrived yet — eager loading can run
+   * before app boot's own loadModelFolders call resolves, and iterating an
+   * empty folder list would silently load nothing.
+   */
+  async function loadModels() {
+    modelDataConsumed = true
+    // A load superseded by a newer concurrent one commits nothing, which
+    // would leave the folder list empty and silently load no models; retry
+    // until a load of ours commits (even a genuinely empty result) or a
+    // concurrent one has populated the list. Bounded as a safety net.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (modelFolderNames.value.length > 0) break
+      if (await loadModelFolders()) break
+    }
+    return Promise.all(modelFolders.value.map((folder) => folder.load()))
+  }
+
+  /**
+   * Discards the cache for a single folder and re-loads its contents.
+   * Use when on-disk contents of that folder have changed (e.g. after upload).
+   * Falls back to refreshing the whole library when the folder is unknown so
+   * a newly-introduced folder type is picked up without dropping other
+   * folders' loaded contents.
+   */
+  const folderRefreshIds = new Map<string, number>()
+
+  async function refreshModelFolder(folderName: string) {
+    modelDataConsumed = true
+    assetService.invalidateModelBuckets()
+    if (!(folderName in modelFolderByName.value)) {
+      await refresh()
+      return
+    }
+    const requestId = modelFoldersRequestId
+    const refreshId = (folderRefreshIds.get(folderName) ?? 0) + 1
+    folderRefreshIds.set(folderName, refreshId)
+    const priorFolder = modelFolderByName.value[folderName]
+    const folder = new ModelFolder(
+      folderName,
+      createGetModelsFunc(),
+      priorFolder.extensions
+    )
+    await folder.load()
+    // A full reload may have rebuilt the folder structure while this folder
+    // refreshed, and a newer refresh of the same folder may have already
+    // committed; committing then would resurrect a stale folder object. The
+    // identity check also covers a rebuild whose folder load started before
+    // this refresh snapshotted the request id.
+    if (requestId !== modelFoldersRequestId) return
+    if (folderRefreshIds.get(folderName) !== refreshId) return
+    if (modelFolderByName.value[folderName] !== priorFolder) return
+    modelFolderByName.value[folderName] = folder
+  }
+
+  /**
+   * Re-fetches the folder structure and re-loads any folder whose contents
+   * had previously been loaded, picking up server-side changes without
+   * losing the currently-visible contents. Double-buffered: the new
+   * structure loads its contents off-screen and swaps in whole, so the
+   * visible tree never blanks to uninitialized folders mid-reload. Returns
+   * false without committing when a newer concurrent load superseded this
+   * one — the winning load populates the fresh data.
+   */
+  async function reloadModels(): Promise<boolean> {
+    assetService.invalidateModelBuckets()
+    // Loading counts as previously loaded: a scan-complete reload can land
+    // while the eager load is still in flight, and replacing those folder
+    // objects without re-loading them would strand the sidebar on
+    // uninitialized folders whose original loads finish into detached
+    // objects.
+    const previouslyLoaded = modelFolders.value
+      .filter((folder) => folder.state !== ResourceState.Uninitialized)
+      .map((folder) => folder.directory)
+    const prepared = await prepareModelFolders()
+    if (!prepared) return false
+    await Promise.all(
+      previouslyLoaded
+        .filter((name) => name in prepared.folders)
+        .map((name) => prepared.folders[name].load())
+    )
+    // Re-check before the swap: a newer request may have started while the
+    // off-screen contents loaded.
+    if (prepared.requestId !== modelFoldersRequestId) return false
+    commitModelFolders(prepared)
+    return true
+  }
+
+  /**
+   * Asks the backend to rescan the model roots so files added on disk since
+   * startup become assets. Skipped on Cloud (models are ingested via uploads,
+   * not scanned from disk) and on the legacy listing path (which reads the
+   * filesystem live on every request).
+   */
+  async function requestModelScan() {
+    if (isCloud) return
+    if (!usesAssetApi()) return
+    try {
+      await assetService.seedModelAssets()
+    } catch (error) {
+      console.warn('Unable to start model asset scan', error)
+    }
+  }
+
+  /**
+   * Manual refresh ("r" key, sidebar refresh button): kicks off a backend
+   * rescan and immediately re-loads the currently known server state; the
+   * scan completion subscription below re-loads again with whatever the
+   * scan discovered. The scan is deliberately not awaited so it runs
+   * concurrently with the reload. False means a newer concurrent load
+   * superseded this one, not a failure.
+   */
+  async function refresh(): Promise<boolean> {
+    modelDataConsumed = true
+    void requestModelScan()
+    return await reloadModels()
+  }
+
+  /**
+   * Scan completions arrive as one event per scanned root and can land in
+   * bursts; coalesce them into one trailing reload instead of one full
+   * library walk per event.
+   */
+  const SCAN_RELOAD_DEBOUNCE_MS = 500
+
+  const reloadAfterScan = debounce(async () => {
+    try {
+      await reloadModels()
+    } catch (error) {
+      console.error('Failed to reload the model library after a scan', error)
+    }
+  }, SCAN_RELOAD_DEBOUNCE_MS)
+
+  const unsubscribeModelsScanned = assetService.onModelsScanned(() => {
+    // A scan changes bucket contents even when no UI has read this store
+    // yet; drop the cache so the eventual first read walks fresh data, but
+    // skip the reload nothing is displaying.
+    assetService.invalidateModelBuckets()
+    if (!modelDataConsumed) return
+    reloadAfterScan()
+  })
+  onScopeDispose(() => {
+    reloadAfterScan.cancel()
+    unsubscribeModelsScanned()
+  })
+
+  const { flags } = useFeatureFlags()
+
+  watch(
+    () => flags.supportsModelTypeTags,
+    () =>
+      usesAssetApi() &&
+      reloadModels().catch((error) => {
+        console.error(
+          'Failed to reload the model library after a capability change',
+          error
+        )
+      })
+  )
+
+  return {
+    models,
+    modelFolders,
+    visibleModelFolders,
+    loadModelFolders,
+    loadModels,
+    getLoadedModelFolder,
+    refreshModelFolder,
+    refresh
+  }
+})

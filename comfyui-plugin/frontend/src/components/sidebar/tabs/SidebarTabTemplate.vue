@@ -1,0 +1,54 @@
+<template>
+  <div
+    :class="
+      cn(
+        'comfy-vue-side-bar-container group/sidebar-tab flex size-full flex-col',
+        props.class
+      )
+    "
+  >
+    <div class="comfy-vue-side-bar-header flex flex-col">
+      <Toolbar
+        v-if="!hideToolbar"
+        class="min-h-16 rounded-none border-x-0 border-t-0 bg-transparent px-3 2xl:px-4"
+        :pt="sidebarPt"
+      >
+        <template #start>
+          <span class="truncate font-bold" :title="props.title">
+            {{ props.title }}
+          </span>
+          <slot name="alt-title" />
+        </template>
+        <template #end>
+          <div
+            class="flex flex-row overflow-hidden transition-all duration-200 motion-safe:w-0 motion-safe:opacity-0 motion-safe:group-focus-within/sidebar-tab:w-auto motion-safe:group-focus-within/sidebar-tab:opacity-100 motion-safe:group-hover/sidebar-tab:w-auto motion-safe:group-hover/sidebar-tab:opacity-100 touch:w-auto touch:opacity-100 [&_.p-button]:py-1 2xl:[&_.p-button]:py-2"
+          >
+            <slot name="tool-buttons" />
+          </div>
+        </template>
+      </Toolbar>
+      <slot name="header" />
+    </div>
+    <!-- h-0 to force scrollpanel to grow -->
+    <ScrollPanel class="comfy-vue-side-bar-body h-0 grow">
+      <slot name="body" />
+    </ScrollPanel>
+    <slot name="footer" />
+  </div>
+</template>
+
+<script setup lang="ts">
+import ScrollPanel from 'primevue/scrollpanel'
+import Toolbar from 'primevue/toolbar'
+
+import { cn } from '@comfyorg/tailwind-utils'
+
+const props = defineProps<{
+  title: string
+  class?: string
+  hideToolbar?: boolean
+}>()
+const sidebarPt = {
+  start: 'min-w-0 flex-1 overflow-hidden'
+}
+</script>

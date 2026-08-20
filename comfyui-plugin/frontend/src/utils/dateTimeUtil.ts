@@ -1,0 +1,110 @@
+const isoFractionalSecondsPattern = /\.(\d+)(?=Z|[+-]\d{2}:?\d{2}|$)/
+
+/**
+ * Parse an ISO 8601 date string tolerantly. Some JavaScript Date parsers reject
+ * fractional seconds unless they are exactly 3 digits, which turns values like
+ * "2026-04-18T10:04:55.6Z" or "2026-04-18T10:04:55.6513Z" into Invalid Date.
+ * This helper normalizes the fractional portion to millisecond precision first.
+ *
+ * @returns Parsed Date, or null if the string is missing or unparseable.
+ */
+export function parseIsoDateSafe(
+  input: string | null | undefined
+): Date | null {
+  if (!input) return null
+  const normalized = input.replace(
+    isoFractionalSecondsPattern,
+    (_, fractionalSeconds: string) =>
+      `.${fractionalSeconds.slice(0, 3).padEnd(3, '0')}`
+  )
+  const date = new Date(normalized)
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
+/**
+ * Return a local date key in YYYY-MM-DD format for grouping.
+ *
+ * @param ts Unix timestamp in milliseconds
+ * @returns Local date key string
+ */
+export const dateKey = (ts: number): string => {
+  const d = new Date(ts)
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+/**
+ * Check if a timestamp is on the same local day as today.
+ *
+ * @param ts Unix timestamp in milliseconds
+ * @returns True if today
+ */
+export const isToday = (ts: number): boolean => {
+  const d = new Date(ts)
+  const now = new Date()
+  return (
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  )
+}
+
+/**
+ * Check if a timestamp corresponds to yesterday in local time.
+ *
+ * @param ts Unix timestamp in milliseconds
+ * @returns True if yesterday
+ */
+export const isYesterday = (ts: number): boolean => {
+  const d = new Date(ts)
+  const now = new Date()
+  const yest = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
+  return (
+    d.getFullYear() === yest.getFullYear() &&
+    d.getMonth() === yest.getMonth() &&
+    d.getDate() === yest.getDate()
+  )
+}
+
+/**
+ * Localized short month + day label, e.g. "Jan 2".
+ *
+ * @param ts Unix timestamp in milliseconds
+ * @param locale BCP-47 locale string
+ * @returns Localized month/day label
+ */
+export const formatShortMonthDay = (ts: number, locale: string): string => {
+  const d = new Date(ts)
+  return new Intl.DateTimeFormat(locale, {
+    month: 'short',
+    day: 'numeric'
+  }).format(d)
+}
+
+/**
+ * Localized clock time, e.g. "10:05:06" with the app locale for language and
+ * the browser/system locale preference for 12/24-hour formatting.
+ *
+ * @param ts Unix timestamp in milliseconds
+ * @param locale BCP-47 locale string
+ * @param clockPreferenceLocale Optional locale source for hour-cycle preference
+ * @returns Localized time string
+ */
+export const formatClockTime = (
+  ts: number,
+  locale: string,
+  clockPreferenceLocale?: string
+): string => {
+  const d = new Date(ts)
+  const { hourCycle } = new Intl.DateTimeFormat(clockPreferenceLocale, {
+    hour: 'numeric'
+  }).resolvedOptions()
+  return new Intl.DateTimeFormat(locale, {
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle
+  }).format(d)
+}

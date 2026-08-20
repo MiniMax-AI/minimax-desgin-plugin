@@ -1,0 +1,15 @@
+import type { LGraphNode } from '@/lib/litegraph/src/litegraph'
+
+export const CANVAS_IMAGE_PREVIEW_WIDGET = '$$canvas-image-preview'
+
+const CANVAS_IMAGE_PREVIEW_NODE_TYPES = new Set([
+  'KSampler',
+  'KSamplerAdvanced',
+  'PreviewImage',
+  'SaveImage',
+  'GLSLShader'
+])
+
+export function supportsVirtualCanvasImagePreview(node: LGraphNode): boolean {
+  return CANVAS_IMAGE_PREVIEW_NODE_TYPES.has(node.type)
+}

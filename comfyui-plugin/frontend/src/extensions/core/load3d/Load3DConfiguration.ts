@@ -1,0 +1,359 @@
+import { LOAD3D_NONE_MODEL } from '@/extensions/core/load3d/constants'
+import Load3d from '@/extensions/core/load3d/Load3d'
+import Load3dUtils from '@/extensions/core/load3d/Load3dUtils'
+import type {
+  CameraConfig,
+  CameraState,
+  HDRIConfig,
+  LightConfig,
+  ModelConfig,
+  SceneConfig
+} from '@/extensions/core/load3d/interfaces'
+import type { Dictionary } from '@/lib/litegraph/src/interfaces'
+import type { NodeProperty } from '@/lib/litegraph/src/LGraphNode'
+import type { IBaseWidget } from '@/lib/litegraph/src/types/widgets'
+import { useSettingStore } from '@/platform/settings/settingStore'
+import { api } from '@/scripts/api'
+
+type Load3DConfigurationSettings = {
+  loadFolder: string
+  modelWidget: IBaseWidget
+  cameraState?: CameraState
+  width?: IBaseWidget
+  height?: IBaseWidget
+  bgImagePath?: string
+  silentOnNotFound?: boolean
+  /**
+   * Called when a user-driven change to one of the wired widgets
+   * (model_file, width, height) makes the previously captured scene stale.
+   * Backend caching covers these inputs by themselves; this hook lets the
+   * caller invalidate any frontend-side capture cache so the next serialize
+   * re-renders at the new state.
+   */
+  onSceneInvalidated?: () => void
+}
+
+const ANNOTATED_FILENAME_PATTERN = / \[(input|output|temp)\]$/
+
+export function parseAnnotatedFilename(
+  rawValue: string,
+  fallbackFolder: string
+): { filename: string; folder: string } {
+  const match = ANNOTATED_FILENAME_PATTERN.exec(rawValue)
+  if (!match) return { filename: rawValue, folder: fallbackFolder }
+  return {
+    filename: rawValue.slice(0, match.index),
+    folder: match[1]
+  }
+}
+
+class Load3DConfiguration {
+  constructor(
+    private load3d: Load3d,
+    private properties?: Dictionary<NodeProperty | undefined>
+  ) {}
+
+  configureForSaveMesh(
+    loadFolder: 'input' | 'output' | 'temp',
+    filePath: string,
+    options?: { silentOnNotFound?: boolean }
+  ) {
+    this.setupModelHandlingForSaveMesh(
+      filePath,
+      loadFolder,
+      options?.silentOnNotFound ?? false
+    )
+    this.setupDefaultProperties()
+  }
+
+  configure(setting: Load3DConfigurationSettings) {
+    this.setupModelHandling(
+      setting.modelWidget,
+      setting.loadFolder,
+      setting.cameraState,
+      setting.silentOnNotFound ?? false,
+      setting.onSceneInvalidated
+    )
+    this.setupTargetSize(
+      setting.width,
+      setting.height,
+      setting.onSceneInvalidated
+    )
+    this.setupDefaultProperties(setting.bgImagePath)
+  }
+
+  private setupTargetSize(
+    width?: IBaseWidget,
+    height?: IBaseWidget,
+    onSceneInvalidated?: () => void
+  ) {
+    if (width && height) {
+      this.load3d.setTargetSize(width.value as number, height.value as number)
+
+      width.callback = (value: number) => {
+        this.load3d.setTargetSize(value, height.value as number)
+        onSceneInvalidated?.()
+      }
+
+      height.callback = (value: number) => {
+        this.load3d.setTargetSize(width.value as number, value)
+        onSceneInvalidated?.()
+      }
+    }
+  }
+
+  private setupModelHandlingForSaveMesh(
+    filePath: string,
+    loadFolder: string,
+    silentOnNotFound: boolean
+  ) {
+    const onModelWidgetUpdate = this.createModelUpdateHandler(
+      loadFolder,
+      undefined,
+      silentOnNotFound
+    )
+
+    if (filePath) {
+      void onModelWidgetUpdate(filePath)
+    }
+  }
+
+  private setupModelHandling(
+    modelWidget: IBaseWidget,
+    loadFolder: string,
+    cameraState?: CameraState,
+    silentOnNotFound: boolean = false,
+    onSceneInvalidated?: () => void
+  ) {
+    const onModelWidgetUpdate = this.createModelUpdateHandler(
+      loadFolder,
+      cameraState,
+      silentOnNotFound
+    )
+    if (modelWidget.value && modelWidget.value !== LOAD3D_NONE_MODEL) {
+      void onModelWidgetUpdate(modelWidget.value)
+    }
+
+    const originalCallback = modelWidget.callback
+
+    let currentValue = modelWidget.value
+    Object.defineProperty(modelWidget, 'value', {
+      get() {
+        return currentValue
+      },
+      set(newValue) {
+        currentValue = newValue
+        if (modelWidget.callback && newValue !== undefined && newValue !== '') {
+          modelWidget.callback(newValue)
+        }
+      },
+      enumerable: true,
+      configurable: true
+    })
+
+    modelWidget.callback = (value: string | number | boolean | object) => {
+      void onModelWidgetUpdate(value)
+
+      if (originalCallback) {
+        originalCallback(value)
+      }
+
+      onSceneInvalidated?.()
+    }
+  }
+
+  private setupDefaultProperties(bgImagePath?: string) {
+    const sceneConfig = this.loadSceneConfig()
+    this.applySceneConfig(sceneConfig, bgImagePath)
+
+    const cameraConfig = this.loadCameraConfig()
+    this.applyCameraConfig(cameraConfig)
+
+    const lightConfig = this.loadLightConfig()
+    this.applyLightConfig(lightConfig)
+    if (lightConfig.hdri) this.applyHDRISettings(lightConfig.hdri)
+  }
+
+  private loadSceneConfig(): SceneConfig {
+    if (this.properties && 'Scene Config' in this.properties) {
+      return this.properties['Scene Config'] as SceneConfig
+    }
+
+    return {
+      showGrid: useSettingStore().get('Comfy.Load3D.ShowGrid'),
+      backgroundColor:
+        '#' + useSettingStore().get('Comfy.Load3D.BackgroundColor'),
+      backgroundImage: ''
+    } as SceneConfig
+  }
+
+  private loadCameraConfig(): CameraConfig {
+    if (this.properties && 'Camera Config' in this.properties) {
+      return this.properties['Camera Config'] as CameraConfig
+    }
+
+    return {
+      cameraType: useSettingStore().get('Comfy.Load3D.CameraType'),
+      fov: 35
+    } as CameraConfig
+  }
+
+  private loadLightConfig(): LightConfig {
+    const hdriDefaults: HDRIConfig = {
+      enabled: false,
+      hdriPath: '',
+      showAsBackground: false,
+      intensity: 1
+    }
+
+    if (this.properties && 'Light Config' in this.properties) {
+      const saved = this.properties['Light Config'] as Partial<LightConfig>
+      return {
+        intensity:
+          saved.intensity ??
+          (useSettingStore().get('Comfy.Load3D.LightIntensity') as number),
+        hdri: { ...hdriDefaults, ...(saved.hdri ?? {}) }
+      }
+    }
+
+    return {
+      intensity: useSettingStore().get('Comfy.Load3D.LightIntensity') as number,
+      hdri: hdriDefaults
+    }
+  }
+
+  private loadModelConfig(): ModelConfig {
+    if (this.properties && 'Model Config' in this.properties) {
+      const config = this.properties['Model Config'] as ModelConfig
+      if (!config.gizmo) {
+        config.gizmo = {
+          enabled: false,
+          mode: 'translate',
+          position: { x: 0, y: 0, z: 0 },
+          rotation: { x: 0, y: 0, z: 0 },
+          scale: { x: 1, y: 1, z: 1 }
+        }
+      } else if (!config.gizmo.scale) {
+        config.gizmo.scale = { x: 1, y: 1, z: 1 }
+      }
+      return config
+    }
+
+    return {
+      upDirection: 'original',
+      materialMode: 'original',
+      showSkeleton: false,
+      gizmo: {
+        enabled: false,
+        mode: 'translate',
+        position: { x: 0, y: 0, z: 0 },
+        rotation: { x: 0, y: 0, z: 0 },
+        scale: { x: 1, y: 1, z: 1 }
+      }
+    }
+  }
+
+  private applySceneConfig(config: SceneConfig, bgImagePath?: string) {
+    this.load3d.toggleGrid(config.showGrid)
+    this.load3d.setBackgroundColor(config.backgroundColor)
+    if (config.backgroundImage) {
+      if (bgImagePath && bgImagePath != config.backgroundImage) {
+        return
+      }
+
+      void this.load3d.setBackgroundImage(config.backgroundImage)
+
+      if (config.backgroundRenderMode) {
+        this.load3d.setBackgroundRenderMode(config.backgroundRenderMode)
+      }
+    }
+  }
+
+  private applyCameraConfig(config: CameraConfig) {
+    this.load3d.toggleCamera(config.cameraType)
+    this.load3d.setFOV(config.fov)
+
+    if (config.state) {
+      this.load3d.setCameraState(config.state)
+    }
+  }
+
+  private applyLightConfig(config: LightConfig) {
+    this.load3d.setLightIntensity(config.intensity)
+  }
+
+  private applyHDRISettings(config: HDRIConfig) {
+    if (!config.hdriPath) return
+    this.load3d.setHDRIIntensity(config.intensity)
+    this.load3d.setHDRIAsBackground(config.showAsBackground)
+    if (config.enabled) {
+      this.load3d.setHDRIEnabled(true)
+    }
+  }
+
+  private applyModelConfig(config: ModelConfig) {
+    this.load3d.setUpDirection(config.upDirection)
+    this.load3d.setMaterialMode(config.materialMode)
+  }
+
+  private createModelUpdateHandler(
+    loadFolder: string,
+    cameraState?: CameraState,
+    silentOnNotFound: boolean = false
+  ) {
+    let isFirstLoad = true
+    return async (value: string | number | boolean | object) => {
+      if (!value || value === LOAD3D_NONE_MODEL) {
+        this.load3d.clearModel()
+        return
+      }
+
+      const { filename, folder } = parseAnnotatedFilename(
+        value as string,
+        loadFolder
+      )
+
+      this.setResourceFolder(filename)
+
+      const modelUrl = api.apiURL(
+        Load3dUtils.getResourceURL(
+          ...Load3dUtils.splitFilePath(filename),
+          folder
+        )
+      )
+
+      await this.load3d.loadModel(modelUrl, filename, { silentOnNotFound })
+
+      const modelConfig = this.loadModelConfig()
+      this.applyModelConfig(modelConfig)
+
+      if (isFirstLoad && cameraState) {
+        try {
+          this.load3d.setCameraState(cameraState)
+        } catch (error) {
+          console.warn('Failed to restore camera state:', error)
+        }
+        isFirstLoad = false
+      }
+
+      this.load3d.emitModelReady()
+    }
+  }
+
+  private setResourceFolder(filename: string): void {
+    const pathParts = filename.split('/').filter((part) => part.trim())
+
+    if (pathParts.length <= 2) {
+      return
+    }
+
+    const subfolderParts = pathParts.slice(1, -1)
+    const subfolder = subfolderParts.join('/')
+
+    if (subfolder && this.properties) {
+      this.properties['Resource Folder'] = subfolder
+    }
+  }
+}
+
+export default Load3DConfiguration

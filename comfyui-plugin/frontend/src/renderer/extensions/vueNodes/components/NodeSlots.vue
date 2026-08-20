@@ -1,0 +1,115 @@
+<template>
+  <div v-if="renderError" class="node-error p-2 text-sm text-red-500">
+    {{ st('nodeErrors.slots', 'Node Slots Error') }}
+  </div>
+  <div v-else :class="cn('flex min-w-0 justify-between', unifiedWrapperClass)">
+    <div
+      v-if="filteredInputs.length"
+      :class="cn('flex min-w-0 flex-col', unifiedDotsClass)"
+    >
+      <InputSlot
+        v-for="(input, index) in filteredInputs"
+        :key="`input-${input.name}-${getActualInputIndex(input, index)}`"
+        :slot-data="input"
+        :node-type="nodeData?.type || ''"
+        :node-id="nodeData.id"
+        :has-error="inputHasError(input)"
+        :index="getActualInputIndex(input, index)"
+      />
+    </div>
+
+    <div
+      v-if="nodeData?.outputs?.length"
+      :class="cn('ml-auto flex min-w-0 flex-col', unifiedDotsClass)"
+    >
+      <OutputSlot
+        v-for="(output, index) in nodeData.outputs"
+        :key="`output-${output.name}-${index}`"
+        :slot-data="output"
+        :node-type="nodeData?.type || ''"
+        :node-id="nodeData.id"
+        :index="index"
+      />
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { computed, onErrorCaptured, ref } from 'vue'
+
+import type { VueNodeData } from '@/composables/graph/useGraphNodeManager'
+import { useErrorHandling } from '@/composables/useErrorHandling'
+import { st } from '@/i18n'
+import type { INodeSlot } from '@/lib/litegraph/src/litegraph'
+import {
+  linkedWidgetedInputs,
+  nonWidgetedInputs
+} from '@/renderer/extensions/vueNodes/utils/nodeDataUtils'
+import { useExecutionErrorStore } from '@/stores/executionErrorStore'
+import { getLocatorIdFromNodeData } from '@/utils/graphTraversalUtil'
+import { cn } from '@comfyorg/tailwind-utils'
+
+import InputSlot from './InputSlot.vue'
+import OutputSlot from './OutputSlot.vue'
+
+interface NodeSlotsProps {
+  nodeData: VueNodeData
+  unified?: boolean
+}
+
+const { nodeData, unified = false } = defineProps<NodeSlotsProps>()
+const executionErrorStore = useExecutionErrorStore()
+const nodeLocatorId = computed(() => getLocatorIdFromNodeData(nodeData))
+
+const linkedWidgetInputs = computed(() =>
+  unified ? linkedWidgetedInputs(nodeData) : []
+)
+
+const filteredInputs = computed(() => [
+  ...nonWidgetedInputs(nodeData),
+  ...linkedWidgetInputs.value
+])
+
+function inputHasError(input: INodeSlot): boolean {
+  const locatorId = nodeLocatorId.value
+  if (!locatorId) return false
+
+  return executionErrorStore.slotHasError(locatorId, input.name)
+}
+
+const unifiedWrapperClass = computed((): string =>
+  cn(
+    unified &&
+      'pointer-events-none absolute inset-0 z-30 items-center opacity-0'
+  )
+)
+const unifiedDotsClass = computed((): string =>
+  cn(
+    unified &&
+      'grid grid-cols-1 grid-rows-1 place-items-center gap-0 *:col-span-full *:row-span-full'
+  )
+)
+
+// Get the actual index of an input slot in the node's inputs array
+// (accounting for filtered widget slots)
+const getActualInputIndex = (
+  input: INodeSlot,
+  filteredIndex: number
+): number => {
+  if (!nodeData?.inputs) return filteredIndex
+
+  // Find the actual index in the unfiltered inputs array
+  const actualIndex = nodeData.inputs.findIndex((i) => i === input)
+  return actualIndex !== -1 ? actualIndex : filteredIndex
+}
+
+// Error boundary implementation
+const renderError = ref<string | null>(null)
+const { toastErrorHandler } = useErrorHandling()
+
+onErrorCaptured((error) => {
+  renderError.value = error.message
+  toastErrorHandler(error)
+  return false
+})
+</script>

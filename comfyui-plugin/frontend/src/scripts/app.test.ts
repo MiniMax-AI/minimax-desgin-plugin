@@ -1,0 +1,1352 @@
+import { createTestingPinia } from '@pinia/testing'
+import { setActivePinia } from 'pinia'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+import { LGraph, LGraphNode } from '@/lib/litegraph/src/litegraph'
+import type { LGraphCanvas } from '@/lib/litegraph/src/litegraph'
+import type {
+  ComfyApiWorkflow,
+  ComfyWorkflowJSON
+} from '@/platform/workflow/validation/schemas/workflowSchema'
+import { ComfyWorkflow } from '@/platform/workflow/management/stores/workflowStore'
+import { ComfyApp, app as singletonApp } from './app'
+import { createNode } from '@/utils/litegraphUtil'
+import {
+  pasteAudioNode,
+  pasteAudioNodes,
+  pasteImageNode,
+  pasteImageNodes,
+  pasteVideoNode,
+  pasteVideoNodes
+} from '@/composables/usePaste'
+import Load3dUtils from '@/extensions/core/load3d/Load3dUtils'
+import { getWorkflowDataFromFile } from '@/scripts/metadata/parser'
+import { useMissingModelStore } from '@/platform/missingModel/missingModelStore'
+import { setTelemetryRegistry } from '@/platform/telemetry'
+import { TelemetryRegistry } from '@/platform/telemetry/TelemetryRegistry'
+import * as executionContextUtils from '@/platform/telemetry/utils/getExecutionContext'
+
+import { PromptExecutionError, api } from '@/scripts/api'
+import { useExecutionErrorStore } from '@/stores/executionErrorStore'
+import { useExecutionStore } from '@/stores/executionStore'
+import { useDialogStore } from '@/stores/dialogStore'
+import type { NodeError } from '@/schemas/apiSchema'
+import type { ComfyNodeDef } from '@/schemas/nodeDefSchema'
+import { createNodeExecutionId } from '@/types/nodeIdentification'
+import {
+  createTestRootGraph,
+  createTestSubgraph,
+  createTestSubgraphNode
+} from '@/lib/litegraph/src/subgraph/__fixtures__/subgraphHelpers'
+import { useWidgetValueStore } from '@/stores/widgetValueStore'
+import type { importA1111 } from './pnginfo'
+import type { useWorkflowService } from '@/platform/workflow/core/services/workflowService'
+
+type WorkflowService = ReturnType<typeof useWorkflowService>
+
+const {
+  mockApiKeyAuthStore,
+  mockAuthStore,
+  mockSettingStore,
+  mockToastStore,
+  mockExtensionService,
+  mockNodeOutputStore,
+  mockWorkspaceWorkflow,
+  mockRefreshMissingModelPipeline,
+  mockImportA1111,
+  mockWorkflowService
+} = vi.hoisted(() => ({
+  mockApiKeyAuthStore: {
+    getApiKey: vi.fn()
+  },
+  mockAuthStore: {
+    getAuthToken: vi.fn()
+  },
+  mockSettingStore: {
+    get: vi.fn()
+  },
+  mockToastStore: {
+    addAlert: vi.fn(),
+    add: vi.fn(),
+    remove: vi.fn()
+  },
+  mockExtensionService: {
+    invokeExtensions: vi.fn(),
+    invokeExtensionsAsync: vi.fn()
+  },
+  mockNodeOutputStore: {
+    refreshNodeOutputs: vi.fn()
+  },
+  mockWorkspaceWorkflow: {
+    activeWorkflow: null as ComfyWorkflow | null
+  },
+  mockRefreshMissingModelPipeline: vi.fn(),
+  mockImportA1111: vi.fn<typeof importA1111>(),
+  mockWorkflowService: {
+    beforeLoadNewGraph: vi.fn<WorkflowService['beforeLoadNewGraph']>(),
+    afterLoadNewGraph: vi.fn<WorkflowService['afterLoadNewGraph']>(),
+    showPendingWarnings: vi.fn<WorkflowService['showPendingWarnings']>()
+  }
+}))
+
+vi.mock('@/utils/litegraphUtil', () => ({
+  createNode: vi.fn(),
+  isImageNode: vi.fn(),
+  isVideoNode: vi.fn(),
+  isAudioNode: vi.fn(),
+  executeWidgetsCallback: vi.fn(),
+  fixLinkInputSlots: vi.fn()
+}))
+
+vi.mock('@/stores/apiKeyAuthStore', () => ({
+  useApiKeyAuthStore: vi.fn(() => mockApiKeyAuthStore)
+}))
+
+vi.mock('@/stores/authStore', () => ({
+  useAuthStore: vi.fn(() => mockAuthStore)
+}))
+
+vi.mock('@/platform/settings/settingStore', () => ({
+  useSettingStore: vi.fn(() => mockSettingStore)
+}))
+
+vi.mock('@/composables/usePaste', () => ({
+  pasteAudioNode: vi.fn(),
+  pasteAudioNodes: vi.fn(),
+  pasteImageNode: vi.fn(),
+  pasteImageNodes: vi.fn(),
+  pasteVideoNode: vi.fn(),
+  pasteVideoNodes: vi.fn()
+}))
+
+vi.mock('@/scripts/metadata/parser', () => ({
+  getWorkflowDataFromFile: vi.fn()
+}))
+
+vi.mock('./pnginfo', () => ({
+  importA1111: mockImportA1111
+}))
+
+vi.mock('@/platform/workflow/core/services/workflowService', () => ({
+  useWorkflowService: vi.fn(() => mockWorkflowService)
+}))
+
+vi.mock('@/extensions/core/load3d/Load3dUtils', () => ({
+  default: {
+    uploadFile: vi.fn()
+  }
+}))
+
+vi.mock('@/platform/updates/common/toastStore', () => ({
+  useToastStore: vi.fn(() => mockToastStore)
+}))
+
+vi.mock('@/services/extensionService', () => ({
+  useExtensionService: vi.fn(() => mockExtensionService)
+}))
+
+vi.mock('@/stores/nodeOutputStore', () => ({
+  useNodeOutputStore: vi.fn(() => mockNodeOutputStore)
+}))
+
+vi.mock('@/stores/workspaceStore', () => ({
+  useWorkspaceStore: vi.fn(() => ({
+    workflow: mockWorkspaceWorkflow
+  }))
+}))
+
+vi.mock('@/platform/missingModel/missingModelPipeline', () => ({
+  refreshMissingModelPipeline: mockRefreshMissingModelPipeline,
+  runMissingModelPipeline: vi.fn()
+}))
+
+function createMockNode(options: { [K in keyof LGraphNode]?: any } = {}) {
+  return {
+    id: 1,
+    pos: [0, 0],
+    size: [200, 100],
+    type: 'LoadImage',
+    connect: vi.fn(),
+    getBounding: vi.fn(() => new Float64Array([0, 0, 200, 100])),
+    ...options
+  } as LGraphNode
+}
+
+function createMockCanvas(): Partial<LGraphCanvas> {
+  const mockGraph: Partial<LGraph> = {
+    change: vi.fn()
+  }
+
+  return {
+    graph: mockGraph as LGraph,
+    draw: vi.fn(),
+    selectItems: vi.fn(),
+    setGraph: vi.fn()
+  }
+}
+
+function createTestFile(name: string, type: string): File {
+  return new File([''], name, { type })
+}
+
+function createWorkflowGraphData(): ComfyWorkflowJSON {
+  return {
+    last_node_id: 0,
+    last_link_id: 0,
+    nodes: [],
+    links: [],
+    groups: [],
+    config: {},
+    extra: {},
+    version: 0.4
+  }
+}
+
+describe('ComfyApp', () => {
+  let app: ComfyApp
+  let mockCanvas: LGraphCanvas
+
+  beforeEach(() => {
+    setActivePinia(createTestingPinia({ stubActions: false }))
+    vi.resetAllMocks()
+    app = new ComfyApp()
+    mockCanvas = createMockCanvas() as LGraphCanvas
+    app.canvas = mockCanvas as LGraphCanvas
+    mockWorkspaceWorkflow.activeWorkflow = null
+    mockApiKeyAuthStore.getApiKey.mockReturnValue(undefined)
+    mockAuthStore.getAuthToken.mockResolvedValue(undefined)
+    mockExtensionService.invokeExtensions.mockReturnValue([])
+    mockExtensionService.invokeExtensionsAsync.mockResolvedValue(undefined)
+    mockImportA1111.mockResolvedValue('imported')
+    mockWorkflowService.afterLoadNewGraph.mockResolvedValue()
+    mockSettingStore.get.mockImplementation((key: string) =>
+      key === 'Comfy.RightSidePanel.ShowErrorsTab' ? true : undefined
+    )
+  })
+
+  describe('queuePrompt', () => {
+    function prepareEmptyPromptQueue() {
+      const workflow = new ComfyWorkflow({
+        path: 'workflows/review.json',
+        modified: 0,
+        size: 0
+      })
+      const graph = new LGraph()
+      Reflect.set(app, 'rootGraphInternal', graph)
+      Reflect.set(singletonApp, 'rootGraphInternal', graph)
+      mockWorkspaceWorkflow.activeWorkflow = workflow
+      vi.spyOn(app, 'graphToPrompt').mockResolvedValue({
+        output: {},
+        workflow: createWorkflowGraphData()
+      })
+      vi.spyOn(api, 'dispatchCustomEvent').mockImplementation(() => true)
+    }
+
+    it('shows the error overlay for successful prompt responses with node errors', async () => {
+      const graph = new LGraph()
+      const workflow = new ComfyWorkflow({
+        path: 'workflows/review.json',
+        modified: 0,
+        size: 0
+      })
+      const promptOutput: ComfyApiWorkflow = {
+        '1': {
+          class_type: 'PreviewAny',
+          inputs: {},
+          _meta: { title: 'PreviewAny' }
+        }
+      }
+      const nodeErrors: Record<string, NodeError> = {
+        '1': {
+          class_type: 'PreviewAny',
+          dependent_outputs: ['1'],
+          errors: [
+            {
+              type: 'required_input_missing',
+              message: 'Required input is missing: source',
+              details: '',
+              extra_info: { input_name: 'source' }
+            }
+          ]
+        }
+      }
+      Reflect.set(app, 'rootGraphInternal', graph)
+      Reflect.set(singletonApp, 'rootGraphInternal', graph)
+      mockWorkspaceWorkflow.activeWorkflow = workflow
+      vi.spyOn(app, 'graphToPrompt').mockResolvedValue({
+        output: promptOutput,
+        workflow: createWorkflowGraphData()
+      })
+      vi.spyOn(api, 'dispatchCustomEvent').mockImplementation(() => true)
+      vi.spyOn(api, 'queuePrompt').mockResolvedValue({
+        prompt_id: 'job-1',
+        node_errors: nodeErrors,
+        error: ''
+      })
+
+      await expect(app.queuePrompt(0)).resolves.toBe(false)
+
+      const errorStore = useExecutionErrorStore()
+      const executionStore = useExecutionStore()
+      expect(errorStore.lastNodeErrors).toEqual(nodeErrors)
+      expect(errorStore.isErrorOverlayOpen).toBe(true)
+      expect(executionStore.queuedJobs['job-1']?.nodes).toEqual({ '1': false })
+      expect(executionStore.jobIdToSessionWorkflowPath.get('job-1')).toBe(
+        'workflows/review.json'
+      )
+      expect(mockCanvas.draw).toHaveBeenCalledWith(true, true)
+    })
+
+    it('stores workflow telemetry metadata for every accepted batch submission', async () => {
+      prepareEmptyPromptQueue()
+      const registry = new TelemetryRegistry()
+      registry.registerProvider({ trackExecutionOutcome: vi.fn() })
+      setTelemetryRegistry(registry)
+      vi.spyOn(api, 'queuePrompt')
+        .mockResolvedValueOnce({
+          prompt_id: 'job-1',
+          error: ''
+        })
+        .mockResolvedValueOnce({
+          prompt_id: 'job-2',
+          error: ''
+        })
+
+      try {
+        await app.queuePrompt(0, 2, {
+          intent: { trigger_source: 'button' }
+        })
+
+        expect(useExecutionStore().queuedJobs['job-1']).toMatchObject({
+          workflowExecutionIntent: {
+            trigger_source: 'button'
+          },
+          workflowContext: {
+            workflow_type: 'custom',
+            view_mode: 'graph',
+            execution_scope: 'full',
+            total_node_count: 0,
+            executable_node_count: 0,
+            custom_node_count: 0,
+            api_node_count: 0,
+            subgraph_count: 0
+          }
+        })
+        expect(useExecutionStore().queuedJobs['job-2']).toMatchObject({
+          workflowExecutionIntent: {
+            trigger_source: 'button'
+          }
+        })
+      } finally {
+        setTelemetryRegistry(null)
+      }
+    })
+
+    it('tracks a resolved prompt rejection at the submission stage', async () => {
+      prepareEmptyPromptQueue()
+      const trackExecutionOutcome = vi.fn()
+      const registry = new TelemetryRegistry()
+      registry.registerProvider({ trackExecutionOutcome })
+      setTelemetryRegistry(registry)
+      const now = vi.spyOn(performance, 'now').mockReturnValue(42)
+      vi.spyOn(api, 'queuePrompt').mockImplementation(async () => {
+        now.mockReturnValue(62)
+        return {
+          error: 'Prompt rejected'
+        }
+      })
+
+      try {
+        await app.queuePrompt(0)
+
+        expect(trackExecutionOutcome).toHaveBeenCalledExactlyOnceWith({
+          startTime: 42,
+          endTime: 62,
+          success: false,
+          failureReason: 'submission_rejected',
+          trigger_source: 'unknown',
+          workflowContext: {
+            workflow_type: 'custom',
+            view_mode: 'graph',
+            execution_scope: 'full',
+            total_node_count: 0,
+            executable_node_count: 0,
+            custom_node_count: 0,
+            api_node_count: 0,
+            subgraph_count: 0
+          }
+        })
+      } finally {
+        now.mockRestore()
+        setTelemetryRegistry(null)
+      }
+    })
+
+    it('tracks a rejected queue request at the submission stage', async () => {
+      prepareEmptyPromptQueue()
+      const trackExecutionOutcome = vi.fn()
+      const registry = new TelemetryRegistry()
+      registry.registerProvider({ trackExecutionOutcome })
+      setTelemetryRegistry(registry)
+      const now = vi.spyOn(performance, 'now').mockReturnValue(42)
+      vi.spyOn(api, 'queuePrompt').mockImplementation(async () => {
+        now.mockReturnValue(62)
+        throw new PromptExecutionError({
+          error: {
+            type: 'prompt_no_outputs',
+            message: 'Prompt has no outputs',
+            details: ''
+          }
+        })
+      })
+
+      try {
+        await app.queuePrompt(0)
+
+        expect(trackExecutionOutcome).toHaveBeenCalledExactlyOnceWith({
+          startTime: 42,
+          endTime: 62,
+          success: false,
+          failureReason: 'submission_rejected',
+          trigger_source: 'unknown',
+          workflowContext: {
+            workflow_type: 'custom',
+            view_mode: 'graph',
+            execution_scope: 'full',
+            total_node_count: 0,
+            executable_node_count: 0,
+            custom_node_count: 0,
+            api_node_count: 0,
+            subgraph_count: 0
+          }
+        })
+      } finally {
+        now.mockRestore()
+        setTelemetryRegistry(null)
+      }
+    })
+
+    it('tracks prompt construction failures at the submission stage', async () => {
+      prepareEmptyPromptQueue()
+      const trackExecutionOutcome = vi.fn()
+      const registry = new TelemetryRegistry()
+      registry.registerProvider({ trackExecutionOutcome })
+      setTelemetryRegistry(registry)
+      const now = vi.spyOn(performance, 'now').mockReturnValue(42)
+      vi.spyOn(app, 'graphToPrompt').mockImplementation(async () => {
+        now.mockReturnValue(62)
+        throw new Error('Prompt construction failed')
+      })
+
+      try {
+        await expect(app.queuePrompt(0)).rejects.toThrow(
+          'Prompt construction failed'
+        )
+        expect(trackExecutionOutcome).toHaveBeenCalledExactlyOnceWith({
+          startTime: 42,
+          endTime: 62,
+          success: false,
+          failureReason: 'prompt_build_failed',
+          trigger_source: 'unknown'
+        })
+      } finally {
+        now.mockRestore()
+        setTelemetryRegistry(null)
+      }
+    })
+
+    it('stores execution intent when workflow context collection fails', async () => {
+      prepareEmptyPromptQueue()
+      const registry = new TelemetryRegistry()
+      registry.registerProvider({ trackExecutionOutcome: vi.fn() })
+      setTelemetryRegistry(registry)
+      vi.spyOn(
+        executionContextUtils,
+        'getExecutionContext'
+      ).mockImplementationOnce(() => {
+        throw new Error('Context unavailable')
+      })
+      vi.spyOn(api, 'queuePrompt').mockResolvedValue({
+        prompt_id: 'job-1',
+        error: ''
+      })
+
+      try {
+        await app.queuePrompt(0, 1, {
+          intent: { trigger_source: 'button' }
+        })
+
+        expect(useExecutionStore().queuedJobs['job-1']).toMatchObject({
+          workflowExecutionIntent: {
+            trigger_source: 'button'
+          }
+        })
+        expect(
+          useExecutionStore().queuedJobs['job-1']?.workflowContext
+        ).toBeUndefined()
+      } finally {
+        setTelemetryRegistry(null)
+      }
+    })
+
+    it('normalizes runtime queue intent from extension callers', async () => {
+      prepareEmptyPromptQueue()
+      const registry = new TelemetryRegistry()
+      registry.registerProvider({ trackExecutionOutcome: vi.fn() })
+      setTelemetryRegistry(registry)
+      vi.spyOn(api, 'queuePrompt').mockResolvedValue({
+        prompt_id: 'job-1',
+        error: ''
+      })
+
+      try {
+        await Reflect.apply(app.queuePrompt, app, [
+          0,
+          1,
+          {
+            intent: {
+              trigger_source: 'private-workflow-name'
+            }
+          }
+        ])
+
+        expect(
+          useExecutionStore().queuedJobs['job-1']?.workflowExecutionIntent
+        ).toEqual({
+          trigger_source: 'unknown'
+        })
+      } finally {
+        setTelemetryRegistry(null)
+      }
+    })
+
+    it('preserves legacy partial execution calls from extensions', async () => {
+      prepareEmptyPromptQueue()
+      vi.spyOn(api, 'queuePrompt').mockResolvedValue({
+        prompt_id: 'job-1',
+        error: ''
+      })
+      const queueNodeIds = [createNodeExecutionId([1])]
+
+      await app.queuePrompt(0, 1, queueNodeIds)
+
+      expect(api.queuePrompt).toHaveBeenCalledWith(
+        0,
+        expect.anything(),
+        expect.objectContaining({
+          partialExecutionTargets: queueNodeIds
+        })
+      )
+    })
+
+    it('skips workflow context collection without telemetry', async () => {
+      prepareEmptyPromptQueue()
+      const getExecutionContext = vi.spyOn(
+        executionContextUtils,
+        'getExecutionContext'
+      )
+      vi.spyOn(api, 'queuePrompt').mockResolvedValue({
+        prompt_id: 'job-1',
+        error: ''
+      })
+
+      await app.queuePrompt(0)
+
+      expect(getExecutionContext).not.toHaveBeenCalled()
+    })
+
+    it('retains workflow telemetry metadata when the queue UI refresh fails', async () => {
+      prepareEmptyPromptQueue()
+      const registry = new TelemetryRegistry()
+      registry.registerProvider({ trackExecutionOutcome: vi.fn() })
+      setTelemetryRegistry(registry)
+      vi.spyOn(api, 'queuePrompt').mockResolvedValue({
+        prompt_id: 'job-1',
+        error: ''
+      })
+      vi.spyOn(app.ui.queue, 'update').mockRejectedValue(
+        new Error('Queue UI refresh failed')
+      )
+
+      try {
+        await expect(
+          app.queuePrompt(0, 1, {
+            intent: { trigger_source: 'button' }
+          })
+        ).rejects.toThrow('Queue UI refresh failed')
+        expect(useExecutionStore().queuedJobs['job-1']).toMatchObject({
+          workflowExecutionIntent: {
+            trigger_source: 'button'
+          }
+        })
+      } finally {
+        setTelemetryRegistry(null)
+      }
+    })
+
+    it('preserves a failed result when prompt errors include an empty node error record', async () => {
+      prepareEmptyPromptQueue()
+      vi.spyOn(api, 'queuePrompt').mockRejectedValue(
+        new PromptExecutionError({
+          node_errors: {},
+          error: {
+            type: 'prompt_no_outputs',
+            message: 'Prompt has no outputs',
+            details: ''
+          }
+        })
+      )
+
+      await expect(app.queuePrompt(0)).resolves.toBe(false)
+
+      const errorStore = useExecutionErrorStore()
+      expect(errorStore.lastNodeErrors).toBeNull()
+      expect(errorStore.lastPromptError).toMatchObject({
+        type: 'prompt_no_outputs'
+      })
+    })
+
+    it('surfaces governance 403 node errors without an access dialog', async () => {
+      prepareEmptyPromptQueue()
+      const showDialog = vi.spyOn(useDialogStore(), 'showDialog')
+      const nodeErrors: Record<string, NodeError> = {
+        '1': {
+          class_type: 'KlingImage2VideoNode',
+          dependent_outputs: [],
+          errors: [
+            {
+              type: 'PARTNER_NODE_DISABLED',
+              message: 'This node has been disabled by your workspace policy.',
+              details: '',
+              extra_info: { provider: 'kling' }
+            }
+          ]
+        }
+      }
+      vi.spyOn(api, 'queuePrompt').mockRejectedValue(
+        new PromptExecutionError(
+          {
+            node_errors: nodeErrors,
+            error: {
+              type: 'PARTNER_NODE_DISABLED',
+              message: 'Workspace policy denied one or more partner nodes',
+              details: ''
+            }
+          },
+          403
+        )
+      )
+
+      await expect(app.queuePrompt(0)).resolves.toBe(false)
+
+      expect(useExecutionErrorStore().lastNodeErrors).toEqual(nodeErrors)
+      expect(useExecutionErrorStore().isErrorOverlayOpen).toBe(true)
+      expect(showDialog).not.toHaveBeenCalled()
+    })
+
+    it('keeps the access dialog for unrelated 403 responses', async () => {
+      prepareEmptyPromptQueue()
+      const showDialog = vi.spyOn(useDialogStore(), 'showDialog')
+      vi.spyOn(api, 'queuePrompt').mockRejectedValue(
+        new PromptExecutionError(
+          {
+            error: {
+              type: 'access_denied',
+              message: 'This workspace cannot run prompts',
+              details: ''
+            }
+          },
+          403
+        )
+      )
+
+      await expect(app.queuePrompt(0)).resolves.toBe(true)
+
+      expect(showDialog).toHaveBeenCalledWith(
+        expect.objectContaining({ key: 'global-error' })
+      )
+      expect(useExecutionErrorStore().lastNodeErrors).toBeNull()
+    })
+
+    it('preserves a successful result when prompt errors omit node errors', async () => {
+      prepareEmptyPromptQueue()
+      vi.spyOn(api, 'queuePrompt').mockRejectedValue(
+        new PromptExecutionError({
+          error: {
+            type: 'prompt_no_outputs',
+            message: 'Prompt has no outputs',
+            details: ''
+          }
+        })
+      )
+
+      await expect(app.queuePrompt(0)).resolves.toBe(true)
+    })
+
+    it('uses the last processed queue item result after an earlier failure', async () => {
+      prepareEmptyPromptQueue()
+      let rejectFirst!: (reason?: unknown) => void
+      const firstResponse = new Promise<never>((_, reject) => {
+        rejectFirst = reject
+      })
+      vi.spyOn(api, 'queuePrompt')
+        .mockImplementationOnce(() => firstResponse)
+        .mockResolvedValueOnce({
+          prompt_id: 'job-2',
+          error: ''
+        })
+
+      const firstQueue = app.queuePrompt(0)
+      await vi.waitFor(() => {
+        expect(api.queuePrompt).toHaveBeenCalledTimes(1)
+      })
+      await expect(app.queuePrompt(0)).resolves.toBe(false)
+
+      rejectFirst(
+        new PromptExecutionError({
+          node_errors: {},
+          error: {
+            type: 'prompt_no_outputs',
+            message: 'Prompt has no outputs',
+            details: ''
+          }
+        })
+      )
+
+      await expect(firstQueue).resolves.toBe(true)
+      expect(useExecutionErrorStore().lastNodeErrors).toBeNull()
+    })
+  })
+
+  describe('refreshComboInNodes', () => {
+    it('shows success toast and removes the pending toast after node defs reload', async () => {
+      app.vueAppReady = true
+      vi.spyOn(app, 'reloadNodeDefs').mockResolvedValue()
+
+      await app.refreshComboInNodes()
+
+      expect(mockToastStore.add).toHaveBeenCalledWith(
+        expect.objectContaining({ severity: 'info' })
+      )
+      expect(mockToastStore.add).toHaveBeenCalledWith(
+        expect.objectContaining({ severity: 'success' })
+      )
+      expect(mockToastStore.remove).toHaveBeenCalledWith(
+        mockToastStore.add.mock.calls[0][0]
+      )
+    })
+
+    it('shows failure toast, removes the pending toast, and rethrows reload failures', async () => {
+      app.vueAppReady = true
+      const error = new Error('object_info failed')
+      vi.spyOn(app, 'reloadNodeDefs').mockRejectedValue(error)
+
+      await expect(app.refreshComboInNodes()).rejects.toThrow(error)
+
+      expect(mockToastStore.add).toHaveBeenCalledWith(
+        expect.objectContaining({ severity: 'error' })
+      )
+      expect(mockToastStore.remove).toHaveBeenCalledWith(
+        mockToastStore.add.mock.calls[0][0]
+      )
+    })
+  })
+
+  describe('reloadNodeDefs', () => {
+    it('syncs refreshed combo options into promoted combo host state', async () => {
+      const initialOptions = ['missing.safetensors']
+      const refreshedOptions = ['missing.safetensors', 'present.safetensors']
+
+      const rootGraph = createTestRootGraph()
+      const subgraph = createTestSubgraph({
+        rootGraph,
+        inputs: [{ name: 'ckpt_name', type: '*' }]
+      })
+
+      const interiorNode = new LGraphNode(
+        'CheckpointLoaderSimple',
+        'CheckpointLoaderSimple'
+      )
+      const interiorInput = interiorNode.addInput('ckpt_name', '*')
+      interiorInput.widget = { name: 'ckpt_name' }
+      const interiorWidget = interiorNode.addWidget(
+        'combo',
+        'ckpt_name',
+        'missing.safetensors',
+        () => {},
+        { values: initialOptions }
+      )
+      subgraph.add(interiorNode)
+      subgraph.inputNode.slots[0].connect(interiorNode.inputs[0], interiorNode)
+
+      const host = createTestSubgraphNode(subgraph)
+      rootGraph.add(host)
+
+      const hostWidgetId = host.inputs[0].widgetId
+      if (!hostWidgetId) throw new Error('Expected a promoted host widgetId')
+
+      const widgetValueStore = useWidgetValueStore()
+      expect(widgetValueStore.getWidget(hostWidgetId)?.options).toEqual({
+        values: initialOptions
+      })
+
+      const defs: Record<string, ComfyNodeDef> = {
+        CheckpointLoaderSimple: {
+          name: 'CheckpointLoaderSimple',
+          display_name: 'CheckpointLoaderSimple',
+          category: 'loaders',
+          python_module: 'nodes',
+          description: '',
+          input: {
+            required: {
+              ckpt_name: [refreshedOptions, {}]
+            },
+            optional: {}
+          },
+          output: [],
+          output_name: [],
+          output_tooltips: [],
+          output_node: false,
+          deprecated: false,
+          experimental: false
+        }
+      }
+      Reflect.set(app, 'rootGraphInternal', rootGraph)
+      vi.spyOn(app, 'getNodeDefs').mockResolvedValue(defs)
+      vi.spyOn(app, 'registerNodeDef').mockResolvedValue(undefined)
+
+      await app.reloadNodeDefs()
+
+      expect(interiorWidget.options.values).toEqual(refreshedOptions)
+      expect(widgetValueStore.getWidget(hostWidgetId)?.options.values).toEqual(
+        refreshedOptions
+      )
+      expect(mockExtensionService.invokeExtensionsAsync).toHaveBeenCalledWith(
+        'refreshComboInNodes',
+        defs
+      )
+    })
+  })
+
+  describe('refreshMissingModels', () => {
+    it('delegates to the app-independent missing model refresh pipeline', async () => {
+      const graph = {
+        nodes: [],
+        serialize: vi.fn(() => createWorkflowGraphData())
+      }
+      const result = {
+        missingModels: [],
+        confirmedCandidates: []
+      }
+      Reflect.set(app, 'rootGraphInternal', graph)
+      vi.spyOn(app, 'reloadNodeDefs').mockResolvedValue()
+      mockRefreshMissingModelPipeline.mockResolvedValue(result)
+
+      await expect(app.refreshMissingModels({ silent: false })).resolves.toBe(
+        result
+      )
+
+      expect(mockRefreshMissingModelPipeline).toHaveBeenCalledWith({
+        graph,
+        reloadNodeDefs: expect.any(Function),
+        missingModelStore: useMissingModelStore(),
+        silent: false
+      })
+
+      await mockRefreshMissingModelPipeline.mock.calls[0][0].reloadNodeDefs()
+      expect(app.reloadNodeDefs).toHaveBeenCalled()
+    })
+
+    it('omits the node definition reload when reloadDefs is false', async () => {
+      const graph = {
+        nodes: [],
+        serialize: vi.fn(() => createWorkflowGraphData())
+      }
+      Reflect.set(app, 'rootGraphInternal', graph)
+      vi.spyOn(app, 'reloadNodeDefs').mockResolvedValue()
+      mockRefreshMissingModelPipeline.mockResolvedValue({
+        missingModels: [],
+        confirmedCandidates: []
+      })
+
+      await app.refreshMissingModels({ reloadDefs: false })
+
+      expect(mockRefreshMissingModelPipeline).toHaveBeenCalledWith({
+        graph,
+        reloadNodeDefs: undefined,
+        missingModelStore: useMissingModelStore(),
+        silent: true
+      })
+      expect(app.reloadNodeDefs).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('handleFileList', () => {
+    it('should create image nodes for each file in the list', async () => {
+      const mockNode1 = createMockNode({ id: 1 })
+      const mockNode2 = createMockNode({ id: 2 })
+      const mockBatchNode = createMockNode({ id: 3, type: 'BatchImagesNode' })
+
+      vi.mocked(pasteImageNodes).mockResolvedValue([mockNode1, mockNode2])
+      vi.mocked(createNode).mockResolvedValue(mockBatchNode)
+
+      const file1 = createTestFile('test1.png', 'image/png')
+      const file2 = createTestFile('test2.jpg', 'image/jpeg')
+      const files = [file1, file2]
+
+      await app.handleFileList(files)
+
+      expect(pasteImageNodes).toHaveBeenCalledWith(mockCanvas, files)
+      expect(createNode).toHaveBeenCalledWith(mockCanvas, 'BatchImagesNode')
+      expect(mockCanvas.selectItems).toHaveBeenCalledWith([
+        mockNode1,
+        mockNode2,
+        mockBatchNode
+      ])
+      expect(mockNode1.connect).toHaveBeenCalledWith(0, mockBatchNode, 0)
+      expect(mockNode2.connect).toHaveBeenCalledWith(0, mockBatchNode, 1)
+    })
+
+    it('should select single image node without batch node', async () => {
+      const mockNode1 = createMockNode({ id: 1 })
+      vi.mocked(pasteImageNodes).mockResolvedValue([mockNode1])
+
+      const file = createTestFile('test.png', 'image/png')
+
+      await app.handleFileList([file])
+
+      expect(createNode).not.toHaveBeenCalled()
+      expect(mockCanvas.selectItems).toHaveBeenCalledWith([mockNode1])
+      expect(mockNode1.connect).not.toHaveBeenCalled()
+    })
+
+    it('should handle empty file list', async () => {
+      await app.handleFileList([])
+
+      expect(pasteImageNodes).not.toHaveBeenCalled()
+      expect(createNode).not.toHaveBeenCalled()
+    })
+
+    it('should not process unsupported file types', async () => {
+      const invalidFile = createTestFile('test.pdf', 'application/pdf')
+
+      await app.handleFileList([invalidFile])
+
+      expect(pasteImageNodes).not.toHaveBeenCalled()
+      expect(createNode).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('handleAudioFileList', () => {
+    it('should create audio nodes and select them', async () => {
+      const mockNode1 = createMockNode({ id: 1, type: 'LoadAudio' })
+      const mockNode2 = createMockNode({ id: 2, type: 'LoadAudio' })
+      vi.mocked(pasteAudioNodes).mockResolvedValue([mockNode1, mockNode2])
+
+      const file1 = createTestFile('test1.mp3', 'audio/mpeg')
+      const file2 = createTestFile('test2.wav', 'audio/wav')
+
+      await app.handleAudioFileList([file1, file2])
+
+      expect(pasteAudioNodes).toHaveBeenCalledWith(mockCanvas, [file1, file2])
+      expect(mockCanvas.selectItems).toHaveBeenCalledWith([
+        mockNode1,
+        mockNode2
+      ])
+    })
+
+    it('should not select when no nodes created', async () => {
+      vi.mocked(pasteAudioNodes).mockResolvedValue([])
+
+      await app.handleAudioFileList([createTestFile('test.mp3', 'audio/mpeg')])
+
+      expect(mockCanvas.selectItems).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('handleVideoFileList', () => {
+    it('should create video nodes and select them', async () => {
+      const mockNode1 = createMockNode({ id: 1, type: 'LoadVideo' })
+      const mockNode2 = createMockNode({ id: 2, type: 'LoadVideo' })
+      vi.mocked(pasteVideoNodes).mockResolvedValue([mockNode1, mockNode2])
+
+      const file1 = createTestFile('test1.mp4', 'video/mp4')
+      const file2 = createTestFile('test2.webm', 'video/webm')
+
+      await app.handleVideoFileList([file1, file2])
+
+      expect(pasteVideoNodes).toHaveBeenCalledWith(mockCanvas, [file1, file2])
+      expect(mockCanvas.selectItems).toHaveBeenCalledWith([
+        mockNode1,
+        mockNode2
+      ])
+    })
+
+    it('should not select when no nodes created', async () => {
+      vi.mocked(pasteVideoNodes).mockResolvedValue([])
+
+      await app.handleVideoFileList([createTestFile('test.mp4', 'video/mp4')])
+
+      expect(mockCanvas.selectItems).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('positionBatchNodes', () => {
+    it('should position batch node to the right of first node', () => {
+      const mockNode1 = createMockNode({
+        pos: [100, 200],
+        getBounding: vi.fn(() => new Float64Array([100, 200, 300, 400]))
+      })
+      const mockBatchNode = createMockNode({ pos: [0, 0] })
+
+      app.positionBatchNodes([mockNode1], mockBatchNode)
+
+      expect(mockBatchNode.pos).toEqual([500, 230])
+    })
+
+    it('should stack multiple image nodes vertically', () => {
+      const mockNode1 = createMockNode({
+        pos: [100, 200],
+        type: 'LoadImage',
+        getBounding: vi.fn(() => new Float64Array([100, 200, 300, 400]))
+      })
+      const mockNode2 = createMockNode({ pos: [0, 0], type: 'LoadImage' })
+      const mockNode3 = createMockNode({ pos: [0, 0], type: 'LoadImage' })
+      const mockBatchNode = createMockNode({ pos: [0, 0] })
+
+      app.positionBatchNodes([mockNode1, mockNode2, mockNode3], mockBatchNode)
+
+      expect(mockNode1.pos).toEqual([100, 200])
+      expect(mockNode2.pos).toEqual([100, 594])
+      expect(mockNode3.pos).toEqual([100, 963])
+    })
+
+    it('should call graph change once for all nodes', () => {
+      const mockNode1 = createMockNode({
+        getBounding: vi.fn(() => new Float64Array([100, 200, 300, 400]))
+      })
+      const mockBatchNode = createMockNode()
+
+      app.positionBatchNodes([mockNode1], mockBatchNode)
+
+      expect(mockCanvas.graph?.change).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('handleFile', () => {
+    it('should handle image files by creating LoadImage node', async () => {
+      vi.mocked(getWorkflowDataFromFile).mockResolvedValue({})
+
+      const mockNode = createMockNode()
+      vi.mocked(createNode).mockResolvedValue(mockNode)
+
+      const imageFile = createTestFile('test.png', 'image/png')
+
+      await app.handleFile(imageFile)
+
+      expect(createNode).toHaveBeenCalledWith(mockCanvas, 'LoadImage')
+      expect(pasteImageNode).toHaveBeenCalledWith(
+        mockCanvas,
+        expect.any(DataTransferItemList),
+        mockNode
+      )
+    })
+
+    it('should handle audio files by creating LoadAudio node', async () => {
+      vi.mocked(getWorkflowDataFromFile).mockResolvedValue({})
+
+      const mockNode = createMockNode({ type: 'LoadAudio' })
+      vi.mocked(createNode).mockResolvedValue(mockNode)
+
+      const audioFile = createTestFile('test.mp3', 'audio/mpeg')
+
+      await app.handleFile(audioFile)
+
+      expect(createNode).toHaveBeenCalledWith(mockCanvas, 'LoadAudio')
+      expect(pasteAudioNode).toHaveBeenCalledWith(
+        mockCanvas,
+        expect.any(DataTransferItemList),
+        mockNode
+      )
+    })
+
+    it('should handle video files by creating LoadVideo node', async () => {
+      vi.mocked(getWorkflowDataFromFile).mockResolvedValue({})
+
+      const mockNode = createMockNode({ type: 'LoadVideo' })
+      vi.mocked(createNode).mockResolvedValue(mockNode)
+
+      const videoFile = createTestFile('test.mp4', 'video/mp4')
+
+      await app.handleFile(videoFile)
+
+      expect(createNode).toHaveBeenCalledWith(mockCanvas, 'LoadVideo')
+      expect(pasteVideoNode).toHaveBeenCalledWith(
+        mockCanvas,
+        expect.any(DataTransferItemList),
+        mockNode
+      )
+    })
+
+    it('should handle mesh model files by uploading and creating Load3DAdvanced node', async () => {
+      vi.mocked(getWorkflowDataFromFile).mockResolvedValue(undefined)
+      vi.mocked(Load3dUtils.uploadFile).mockResolvedValue('3d/model.glb')
+
+      const modelWidget = {
+        name: 'model_file',
+        value: 'existing.glb',
+        options: { values: ['existing.glb'] }
+      }
+      const mockNode = createMockNode({
+        type: 'Load3DAdvanced',
+        widgets: [modelWidget]
+      })
+      vi.mocked(createNode).mockResolvedValue(mockNode)
+
+      const meshFile = createTestFile('model.glb', '')
+
+      await app.handleFile(meshFile)
+
+      expect(Load3dUtils.uploadFile).toHaveBeenCalledWith(meshFile, '3d')
+      expect(createNode).toHaveBeenCalledWith(mockCanvas, 'Load3DAdvanced')
+      expect(modelWidget.value).toBe('3d/model.glb')
+      expect(modelWidget.options.values).toContain('3d/model.glb')
+    })
+
+    it('should load embedded workflow from mesh files instead of creating Load3DAdvanced node', async () => {
+      vi.mocked(getWorkflowDataFromFile).mockResolvedValue({
+        workflow: createWorkflowGraphData()
+      })
+      const loadGraphData = vi
+        .spyOn(app, 'loadGraphData')
+        .mockResolvedValue(undefined)
+
+      const meshFile = createTestFile('model.glb', 'model/gltf-binary')
+
+      await app.handleFile(meshFile)
+
+      expect(loadGraphData).toHaveBeenCalled()
+      expect(Load3dUtils.uploadFile).not.toHaveBeenCalled()
+      expect(createNode).not.toHaveBeenCalled()
+    })
+
+    it('should not create Load3DAdvanced node when mesh upload fails', async () => {
+      vi.mocked(getWorkflowDataFromFile).mockResolvedValue(undefined)
+      vi.mocked(Load3dUtils.uploadFile).mockResolvedValue(undefined)
+
+      const meshFile = createTestFile('model.obj', '')
+
+      await app.handleFile(meshFile)
+
+      expect(Load3dUtils.uploadFile).toHaveBeenCalledWith(meshFile, '3d')
+      expect(createNode).not.toHaveBeenCalled()
+    })
+
+    it('should report each created Load3DAdvanced node via onNodeCreated', async () => {
+      vi.mocked(getWorkflowDataFromFile).mockResolvedValue(undefined)
+      vi.mocked(Load3dUtils.uploadFile)
+        .mockResolvedValueOnce('3d/a.glb')
+        .mockResolvedValueOnce('3d/b.glb')
+
+      const modelWidgetA = { name: 'model_file', value: '', options: {} }
+      const modelWidgetB = { name: 'model_file', value: '', options: {} }
+      const nodeA = createMockNode({
+        id: 1,
+        type: 'Load3DAdvanced',
+        widgets: [modelWidgetA]
+      })
+      const nodeB = createMockNode({
+        id: 2,
+        type: 'Load3DAdvanced',
+        widgets: [modelWidgetB]
+      })
+      vi.mocked(createNode)
+        .mockResolvedValueOnce(nodeA)
+        .mockResolvedValueOnce(nodeB)
+
+      const onNodeCreated = vi.fn()
+      await app.handleFile(createTestFile('a.glb', ''), 'file_drop', {
+        onNodeCreated
+      })
+      await app.handleFile(createTestFile('b.glb', ''), 'file_drop', {
+        onNodeCreated
+      })
+
+      expect(onNodeCreated).toHaveBeenNthCalledWith(1, nodeA)
+      expect(onNodeCreated).toHaveBeenNthCalledWith(2, nodeB)
+    })
+
+    it('should not report a node via onNodeCreated when mesh upload fails', async () => {
+      vi.mocked(getWorkflowDataFromFile).mockResolvedValue(undefined)
+      vi.mocked(Load3dUtils.uploadFile).mockResolvedValue(undefined)
+
+      const onNodeCreated = vi.fn()
+      await app.handleFile(createTestFile('a.glb', ''), 'file_drop', {
+        onNodeCreated
+      })
+
+      expect(onNodeCreated).not.toHaveBeenCalled()
+    })
+
+    it('positionNodes spreads stacked nodes so multi-mesh drops do not overlap', () => {
+      const nodes = [
+        createMockNode({
+          id: 1,
+          pos: [100, 200],
+          getBounding: vi.fn(() => new Float64Array([100, 200, 200, 100]))
+        }),
+        createMockNode({ id: 2, pos: [100, 200] }),
+        createMockNode({ id: 3, pos: [100, 200] })
+      ]
+
+      app.positionNodes(nodes)
+
+      expect(nodes[0].pos).toEqual([100, 200])
+      expect(nodes[1].pos).toEqual([100, 400])
+      expect(nodes[2].pos).toEqual([100, 575])
+    })
+
+    it('should handle image files with non-workflow metadata by creating LoadImage node', async () => {
+      vi.mocked(getWorkflowDataFromFile).mockResolvedValue({
+        Software: 'gnome-screenshot'
+      })
+
+      const mockNode = createMockNode()
+      vi.mocked(createNode).mockResolvedValue(mockNode)
+
+      const imageFile = createTestFile('screenshot.png', 'image/png')
+
+      await app.handleFile(imageFile)
+
+      expect(createNode).toHaveBeenCalledWith(mockCanvas, 'LoadImage')
+      expect(pasteImageNode).toHaveBeenCalledWith(
+        mockCanvas,
+        expect.any(DataTransferItemList),
+        mockNode
+      )
+    })
+
+    it.each([
+      ['an invalid structure', '[]'],
+      ['invalid JSON', '{invalid']
+    ])('shows one error for %s', async (_case, workflow) => {
+      const consoleError = vi
+        .spyOn(console, 'error')
+        .mockImplementation(() => {})
+      vi.mocked(getWorkflowDataFromFile).mockResolvedValue({ workflow })
+
+      await app.handleFile(createTestFile('broken.json', 'application/json'))
+
+      expect(mockToastStore.addAlert).toHaveBeenCalledTimes(1)
+      expect(mockToastStore.addAlert).toHaveBeenCalledWith(
+        'Unable to find workflow in broken.json'
+      )
+      consoleError.mockRestore()
+    })
+
+    it('preserves the current graph when A1111 core nodes are unavailable', async () => {
+      const graph = new LGraph()
+      const parameters = 'positive\nNegative prompt: negative\nSteps: 20'
+      Reflect.set(app, 'rootGraphInternal', graph)
+      vi.mocked(getWorkflowDataFromFile).mockResolvedValue({ parameters })
+      mockImportA1111.mockResolvedValue('core-nodes-unavailable')
+
+      await app.handleFile(createTestFile('a1111.png', 'image/png'))
+
+      expect(mockImportA1111).toHaveBeenCalledWith(
+        graph,
+        parameters,
+        expect.any(Function)
+      )
+      expect(mockCanvas.setGraph).not.toHaveBeenCalled()
+      expect(mockWorkflowService.beforeLoadNewGraph).not.toHaveBeenCalled()
+      expect(mockWorkflowService.afterLoadNewGraph).not.toHaveBeenCalled()
+      expect(mockToastStore.addAlert).toHaveBeenCalledOnce()
+      expect(mockToastStore.addAlert).toHaveBeenCalledWith(
+        'Could not load the workflow because this ComfyUI installation is missing core nodes. Check that the backend started correctly.'
+      )
+    })
+
+    it('shows one file-load error when parameters are not A1111-shaped', async () => {
+      const graph = new LGraph()
+      const parameters = 'positive\nSteps: 20'
+      Reflect.set(app, 'rootGraphInternal', graph)
+      vi.mocked(getWorkflowDataFromFile).mockResolvedValue({ parameters })
+      mockImportA1111.mockResolvedValue('not-a1111')
+
+      await app.handleFile(createTestFile('parameters.png', 'image/png'))
+
+      expect(mockToastStore.addAlert).toHaveBeenCalledOnce()
+      expect(mockToastStore.addAlert).toHaveBeenCalledWith(
+        'Unable to find workflow in parameters.png'
+      )
+      expect(mockWorkflowService.beforeLoadNewGraph).not.toHaveBeenCalled()
+      expect(mockWorkflowService.afterLoadNewGraph).not.toHaveBeenCalled()
+    })
+
+    it('awaits persistence and orders its clear callback before setGraph', async () => {
+      const graph = new LGraph()
+      const parameters = 'positive\nNegative prompt: negative\nSteps: 20'
+      Reflect.set(app, 'rootGraphInternal', graph)
+      vi.mocked(getWorkflowDataFromFile).mockResolvedValue({ parameters })
+      mockImportA1111.mockImplementation(
+        async (_graph, _parameters, beforeGraphClear) => {
+          beforeGraphClear?.()
+          return 'imported'
+        }
+      )
+      let resolveAfterLoad: (() => void) | undefined
+      const afterLoad = new Promise<void>((resolve) => {
+        resolveAfterLoad = resolve
+      })
+      mockWorkflowService.afterLoadNewGraph.mockReturnValue(afterLoad)
+
+      let settled = false
+      const handleFile = app
+        .handleFile(createTestFile('a1111.png', 'image/png'))
+        .then(() => {
+          settled = true
+        })
+      await vi.waitFor(() =>
+        expect(mockWorkflowService.afterLoadNewGraph).toHaveBeenCalled()
+      )
+
+      expect(mockCanvas.setGraph).toHaveBeenCalledWith(graph)
+      expect(mockWorkflowService.beforeLoadNewGraph).toHaveBeenCalledOnce()
+      expect(
+        mockWorkflowService.beforeLoadNewGraph.mock.invocationCallOrder[0]
+      ).toBeLessThan(vi.mocked(mockCanvas.setGraph).mock.invocationCallOrder[0])
+      expect(settled).toBe(false)
+
+      resolveAfterLoad?.()
+      await handleFile
+      expect(settled).toBe(true)
+    })
+  })
+
+  describe('drop handler', () => {
+    it('syncs graph_mouse from the drop event before downstream handlers run', async () => {
+      // graph_mouse is only updated on mousemove, so when files are dragged in
+      // from another window the canvas-space cursor is stale. The drop handler
+      // must derive the position from the drop event itself.
+      const graphMouse: [number, number] = [-999, -999]
+      const adjustMouseEvent = vi.fn((e: DragEvent) => {
+        ;(e as DragEvent & { canvasX: number; canvasY: number }).canvasX = 123
+        ;(e as DragEvent & { canvasX: number; canvasY: number }).canvasY = 456
+      })
+      app.canvas = {
+        ...mockCanvas,
+        graph_mouse: graphMouse,
+        adjustMouseEvent
+      } as unknown as LGraphCanvas
+
+      ;(app as unknown as { addDropHandler(): void }).addDropHandler()
+
+      document.dispatchEvent(new DragEvent('drop'))
+      await Promise.resolve()
+
+      expect(adjustMouseEvent).toHaveBeenCalledTimes(1)
+      expect(graphMouse).toEqual([123, 456])
+    })
+  })
+})
